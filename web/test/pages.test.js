@@ -46,7 +46,10 @@ test('Pages artifact contains only live frontend files with public bearer config
       assert.ok(html.includes('http-equiv="Content-Security-Policy"'), name);
       assert.ok(html.includes('name="referrer" content="strict-origin-when-cross-origin"'), name);
       assert.ok(!/<script(?![^>]*\bsrc=)[^>]*>\s*\S/i.test(html), 'no inline script: ' + name);
-      if (html.includes('js/api.js')) assert.ok(html.indexOf('js/runtime-config.js') < html.indexOf('js/api.js'), name);
+      if (html.includes('js/api.js')) {
+        assert.ok(html.indexOf('js/runtime-config.js') < html.indexOf('js/api.js'), name);
+        assert.ok(html.includes(`js/runtime-config.js?v=${result.runtimeConfigVersion}`), name);
+      }
     }
     const index = await fs.readFile(path.join(output, 'index.html'), 'utf8');
     assert.ok(index.includes('url=calendar.html'));
@@ -71,9 +74,13 @@ test('Pages rebuild replaces only empty or builder-owned output and preserves un
     assert.equal(await fs.readFile(path.join(unrelated, 'important.txt'), 'utf8'), 'keep this file');
     await assert.rejects(buildPages({ apiBaseUrl: 'https://api.example.com', outputDir: path.parse(temp).root }), /separate/);
     await fs.mkdir(owned);
-    await buildPages({ apiBaseUrl: 'https://api.example.com', outputDir: owned });
+    const first = await buildPages({ apiBaseUrl: 'https://api.example.com', outputDir: owned });
     await fs.writeFile(path.join(owned, 'stale-build.txt'), 'old artifact');
-    await buildPages({ apiBaseUrl: 'https://next-api.example.com', outputDir: owned });
+    const second = await buildPages({ apiBaseUrl: 'https://next-api.example.com', outputDir: owned });
+    assert.notEqual(first.runtimeConfigVersion, second.runtimeConfigVersion);
+    const page = await fs.readFile(path.join(owned, 'login.html'), 'utf8');
+    assert.ok(page.includes(`js/runtime-config.js?v=${second.runtimeConfigVersion}`));
+    assert.ok(!page.includes(`js/runtime-config.js?v=${first.runtimeConfigVersion}`));
     await assert.rejects(fs.access(path.join(owned, 'stale-build.txt')));
     assert.match(await fs.readFile(path.join(owned, 'js/runtime-config.js'), 'utf8'), /next-api\.example\.com/);
   } finally { await fs.rm(temp, { recursive: true, force: true }); }

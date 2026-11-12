@@ -237,8 +237,58 @@ test('public config detects auth-mode mismatch and cache is scoped to backend an
   const config = await api.publicConfig();
   assert.equal(config.googleClientId, null);
   assert.match(config.error, /로그인 방식/);
-  api.setCachedPublicConfig({ googleClientId: 'id' });
+  api.setCachedPublicConfig({ googleClientId: 'id', authMode: 'bearer' });
   assert.equal(api.getCachedPublicConfig().googleClientId, 'id');
+});
+
+test('a failed public-config request recovers on the next call rather than caching a network outage', async () => {
+  let calls = 0;
+  const { api, storage } = createAPI({ config: bearerConfig, fetch: async () => {
+    calls++;
+    if (calls === 1) throw new TypeError('DNS unavailable');
+    return response({ googleClientId: 'public-client-id', authMode: 'bearer' });
+  } });
+  const failed = await api.publicConfig();
+  assert.equal(failed.success, false);
+  assert.equal(failed.code, 'NETWORK_ERROR');
+  assert.equal(storage.has(api.publicConfigCacheKey), false);
+  const recovered = await api.publicConfig();
+  assert.equal(recovered.googleClientId, 'public-client-id');
+  assert.equal(calls, 2);
+  assert.equal((await api.publicConfig()).googleClientId, 'public-client-id');
+  assert.equal(calls, 2, 'healthy configuration may use the short cache');
+});
+
+test('legacy cached errors, HTTP failures, missing clients and auth-mode mismatch are discarded immediately', async () => {
+  const invalid = [
+    { success: false, error: 'old network failure', code: 'NETWORK_ERROR' },
+    { success: false, status: 503, error: 'old HTTP failure' },
+    { googleClientId: null, authMode: 'bearer' },
+    { googleClientId: '', authMode: 'bearer' },
+    { googleClientId: 'client', authMode: 'cookie' },
+    { googleClientId: 'client', authMode: 'bearer', error: 'old config error' },
+    { googleClientId: 'client' }
+  ];
+  for (const value of invalid) {
+    let calls = 0;
+    const { api, storage } = createAPI({ config: bearerConfig, fetch: async () => { calls++; return response({ googleClientId: 'recovered-client', authMode: 'bearer' }); } });
+    storage.set(api.publicConfigCacheKey, JSON.stringify({ value, apiOrigin: bearerConfig.apiBaseUrl, authMode: 'bearer', fetchedAt: Date.now() }));
+    assert.equal(api.getCachedPublicConfig(), null);
+    assert.equal(storage.has(api.publicConfigCacheKey), false);
+    assert.equal((await api.publicConfig()).googleClientId, 'recovered-client');
+    assert.equal(calls, 1);
+  }
+});
+
+test('missing-client and HTTP public-config failures are never persisted and can recover without a forced refresh', async () => {
+  for (const failure of [response({ googleClientId: null, authMode: 'bearer' }), response({ error: 'service unavailable' }, 503)]) {
+    let calls = 0;
+    const { api, storage } = createAPI({ config: bearerConfig, fetch: async () => ++calls === 1 ? failure : response({ googleClientId: 'ready-client', authMode: 'bearer' }) });
+    await api.publicConfig();
+    assert.equal(storage.has(api.publicConfigCacheKey), false);
+    assert.equal((await api.publicConfig()).googleClientId, 'ready-client');
+    assert.equal(calls, 2);
+  }
 });
 
 test('HTML 401 responses still clear bearer credentials before attempting JSON parsing', async () => {
@@ -388,6 +438,41 @@ test('Google login finalization forwards verified approval flags and chooses the
   await vm.runInContext('finalizeGoogleLogin(testUser)', context);
   assert.equal(window.location.replaced, '/assignment/calendar.html');
   assert.equal(api.getUser().is_class_approved, true);
+});
+
+test('login exposes an explicit reconnect button after a network failure and retries only when pressed', async () => {
+  const ui = flowDocument();
+  let connected = false;
+  let configCalls = 0;
+  let rendered = 0;
+  const { context, window } = createAPI({ pathname: '/assignment/login.html', document: ui.document, fetch: async url => {
+    if (url.endsWith('/api/auth/me')) return response({ error: 'not logged in' }, 401);
+    configCalls++;
+    if (!connected) throw new TypeError('offline');
+    return response({ googleClientId: 'ready-client', authMode: 'cookie' });
+  } });
+  window.google = { accounts: { id: { initialize() {}, renderButton() { rendered++; } } } };
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/login.js'), 'utf8'), context);
+  await new Promise(setImmediate);
+  assert.equal(configCalls, 1);
+  assert.equal(ui.nodes.get('retryLoginConfig').hidden, false);
+  assert.match(ui.nodes.get('authError').textContent, /연결/);
+  connected = true;
+  ui.listeners.get('retryLoginConfig:click')();
+  await new Promise(setImmediate);
+  assert.equal(configCalls, 2);
+  assert.equal(rendered, 1);
+  assert.equal(ui.nodes.get('retryLoginConfig').hidden, true);
+  assert.equal(ui.nodes.get('authError').style.display, 'none');
+});
+
+test('an unset Google client is shown as a setup error without a network reconnect action', async () => {
+  const ui = flowDocument();
+  const { context } = createAPI({ pathname: '/assignment/login.html', document: ui.document, fetch: async url => url.endsWith('/api/auth/me') ? response({ error: 'not logged in' }, 401) : response({ googleClientId: null, authMode: 'cookie' }) });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/login.js'), 'utf8'), context);
+  await new Promise(setImmediate);
+  assert.equal(ui.nodes.get('retryLoginConfig').hidden, true);
+  assert.match(ui.nodes.get('authError').textContent, /설정되지/);
 });
 
 test('pending page refresh displays the chosen class then enters the calendar only after server approval', async () => {

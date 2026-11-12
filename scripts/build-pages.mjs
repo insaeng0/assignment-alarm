@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceRoot = path.join(repositoryRoot, 'web', 'src');
@@ -65,6 +66,8 @@ async function assertOwnedOrEmptyOutput(output) {
 export async function buildPages({ apiBaseUrl = process.env.ASSIGNMENT_API_BASE_URL, outputDir = path.join(repositoryRoot, '_site') } = {}) {
   // The public URL is data, never shell/script code. No secrets belong in this build.
   const apiOrigin = validateApiOrigin(apiBaseUrl);
+  const config = { apiBaseUrl: apiOrigin, authMode: 'bearer' };
+  const configVersion = createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 12);
   const output = path.resolve(outputDir);
   if (output === path.parse(output).root || output === repositoryRoot || output === sourceRoot || sourceRoot.startsWith(output + path.sep) || output.startsWith(sourceRoot + path.sep)) {
     throw new Error('The Pages output directory must be separate from application sources');
@@ -81,7 +84,7 @@ export async function buildPages({ apiBaseUrl = process.env.ASSIGNMENT_API_BASE_
     const target = path.join(output, relative);
     await fs.mkdir(path.dirname(target), { recursive: true });
     if (relative.endsWith('.html')) {
-      const html = await fs.readFile(source, 'utf8');
+      const html = (await fs.readFile(source, 'utf8')).replace(/(src=["']js\/runtime-config\.js)(?:\?[^"']*)?(["'])/g, (_match, prefix, quote) => `${prefix}?v=${configVersion}${quote}`);
       if (/<script(?![^>]*\bsrc=)[^>]*>\s*\S/i.test(html)) throw new Error('Inline scripts are not allowed in Pages output: ' + relative);
       const tag = `<meta http-equiv="Content-Security-Policy" content="${policy.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}">\n  <meta name="referrer" content="strict-origin-when-cross-origin">`;
       const withPolicy = html.replace(/(<meta charset="[^"]+">)/i, '$1\n  ' + tag);
@@ -91,9 +94,8 @@ export async function buildPages({ apiBaseUrl = process.env.ASSIGNMENT_API_BASE_
       await fs.copyFile(source, target);
     }
   }
-  const config = { apiBaseUrl: apiOrigin, authMode: 'bearer' };
   await fs.writeFile(path.join(output, 'js', 'runtime-config.js'), '// Public Pages configuration. No credentials are stored here.\nwindow.ASSIGNMENT_CONFIG = Object.freeze(' + JSON.stringify(config) + ');\n');
-  return { outputDir: output, apiOrigin, authMode: 'bearer', files: frontendFiles.length + 1 };
+  return { outputDir: output, apiOrigin, authMode: 'bearer', runtimeConfigVersion: configVersion, files: frontendFiles.length + 1 };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

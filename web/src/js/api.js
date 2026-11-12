@@ -503,8 +503,8 @@ const API = {
       }
       return data;
     } catch (error) {
-      if (error?.code === 'API_CONFIG') return { success: false, error: error.message };
-      return { success: false, error: error?.name === 'AbortError'
+      if (error?.code === 'API_CONFIG') return { success: false, code: 'API_CONFIG', error: error.message };
+      return { success: false, code: error?.name === 'AbortError' ? 'REQUEST_TIMEOUT' : 'NETWORK_ERROR', error: error?.name === 'AbortError'
         ? '응답 시간이 초과되었습니다. 다시 시도해주세요.'
         : '서버에 연결할 수 없습니다. 인터넷 연결을 확인하고 다시 시도해주세요.' };
     } finally {
@@ -525,19 +525,29 @@ const API = {
   logoutRequest() { return this.post('/api/auth/logout'); },
 
   getCachedPublicConfig() {
+    const discard = () => { this.storageRemove(this.publicConfigCacheKey); return null; };
     try {
       const cached = JSON.parse(this.storageGet(this.publicConfigCacheKey) || 'null');
-      if (!cached || typeof cached !== 'object') return null;
-      if (cached.apiOrigin !== this.getApiOrigin()) return null;
-      if (cached.authMode !== this.getAuthMode()) return null;
-      if (!cached.fetchedAt || Date.now() - Number(cached.fetchedAt) > this.publicConfigCacheTtlMs) return null;
-      return cached.value || null;
+      if (!cached || typeof cached !== 'object') return discard();
+      if (cached.apiOrigin !== this.getApiOrigin() || cached.authMode !== this.getAuthMode()) return discard();
+      if (!cached.fetchedAt || Date.now() - Number(cached.fetchedAt) > this.publicConfigCacheTtlMs) return discard();
+      if (!this.isCacheablePublicConfig(cached.value)) return discard();
+      return cached.value;
     } catch {
-      return null;
+      return discard();
     }
   },
 
+  isCacheablePublicConfig(value) {
+    try {
+      return Boolean(value && typeof value === 'object' && value.success !== false && !value.error
+        && typeof value.googleClientId === 'string' && value.googleClientId.trim()
+        && value.authMode === this.getAuthMode());
+    } catch { return false; }
+  },
+
   setCachedPublicConfig(value) {
+    if (!this.isCacheablePublicConfig(value)) { this.storageRemove(this.publicConfigCacheKey); return false; }
     try {
       this.storageSet(this.publicConfigCacheKey, JSON.stringify({
         value,
@@ -545,7 +555,8 @@ const API = {
         authMode: this.getAuthMode(),
         fetchedAt: Date.now()
       }));
-    } catch {}
+      return true;
+    } catch { return false; }
   },
 
   async publicConfig(options = {}) {
@@ -563,7 +574,7 @@ const API = {
       .then((config) => {
         let normalized = config && typeof config === 'object' ? config : {};
         if (normalized.authMode && normalized.authMode !== this.getAuthMode()) {
-          normalized = { ...normalized, googleClientId: null, error: '프런트엔드와 API 서버의 로그인 방식 설정이 다릅니다.' };
+          normalized = { ...normalized, googleClientId: null, code: 'AUTH_MODE_MISMATCH', error: '프런트엔드와 API 서버의 로그인 방식 설정이 다릅니다.' };
         }
         this.setCachedPublicConfig(normalized);
         return normalized;

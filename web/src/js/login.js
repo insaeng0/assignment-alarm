@@ -3,6 +3,7 @@ let googleSetupToken = null;
 let googleButtonRendered = false;
 let googleSignInInFlight = false;
 let googleLoadAttempts = 0;
+let loadingPublicConfig = false;
 
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -54,15 +55,17 @@ async function finalizeGoogleLogin(user) {
   showError('로그인 세션을 확인하는 중 문제가 생겼습니다. 잠시 후 다시 시도해주세요.');
 }
 
-    function showError(msg) {
+    function showError(msg, { retryConfig = false } = {}) {
       const el = document.getElementById('authError');
       el.textContent = msg;
       el.style.display = 'block';
       document.getElementById('loginStatus').hidden = true;
+      document.getElementById('retryLoginConfig').hidden = !retryConfig;
     }
 
     function hideError() {
       document.getElementById('authError').style.display = 'none';
+      document.getElementById('retryLoginConfig').hidden = true;
     }
 
     function showLoginForm() {
@@ -144,15 +147,36 @@ async function handleGoogleCredential(credential) {
       googleButtonRendered = true;
     }
 
-    async function loadPublicConfig() {
-      const config = await API.publicConfig();
-      if (config && config.googleClientId) {
-        googleClientId = config.googleClientId;
-        renderGoogleLoginIfNeeded();
-        return;
+    async function loadPublicConfig({ force = false } = {}) {
+      if (loadingPublicConfig) return;
+      loadingPublicConfig = true;
+      const retry = document.getElementById('retryLoginConfig');
+      retry.disabled = true;
+      const status = document.getElementById('loginStatus');
+      status.hidden = false;
+      status.textContent = '서버에 연결하고 있습니다…';
+      try {
+        const config = await API.publicConfig({ force });
+        if (config && config.googleClientId) {
+          hideError();
+          googleClientId = config.googleClientId;
+          status.textContent = '학교 Google 로그인을 준비하고 있습니다…';
+          renderGoogleLoginIfNeeded();
+          return;
+        }
+        const canRetry = ['NETWORK_ERROR', 'REQUEST_TIMEOUT'].includes(config?.code)
+          || (config?.success === false && Number(config.status) >= 500);
+        showError(config?.error || '구글 로그인이 아직 설정되지 않았습니다.', { retryConfig: canRetry });
+      } finally {
+        loadingPublicConfig = false;
+        retry.disabled = false;
       }
-      showError(config?.error || '구글 로그인이 아직 설정되지 않았습니다.');
     }
+
+document.getElementById('retryLoginConfig').addEventListener('click', () => {
+  hideError();
+  loadPublicConfig({ force: true }).catch(() => showError('로그인 설정을 불러오지 못했습니다. 다시 시도해주세요.'));
+});
 
 document.getElementById('cancelGoogleSetup').addEventListener('click', () => {
   if (googleSignInInFlight) return;
