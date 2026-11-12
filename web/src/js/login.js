@@ -5,10 +5,6 @@ let googleSignInInFlight = false;
 let googleLoadAttempts = 0;
 let loadingPublicConfig = false;
 
-function sleep(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function setGoogleUiBusy(isBusy) {
   googleSignInInFlight = isBusy;
   const loginBox = document.getElementById('googleLoginBox');
@@ -31,28 +27,15 @@ function setGoogleUiBusy(isBusy) {
 }
 
 async function finalizeGoogleLogin(user) {
-  API.setUser(user);
-
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    const sessionUser = await API.me().catch(() => null);
-    if (sessionUser?.user_id) {
-      API.setUser({
-        id: sessionUser.user_id,
-        name: sessionUser.name,
-        grade: sessionUser.grade,
-        class_number: sessionUser.class_number,
-        profile_image_url: sessionUser.profile_image_url,
-        is_alarm_enabled: sessionUser.is_alarm_enabled,
-        can_complete_assignments: sessionUser.can_complete_assignments,
-        is_admin: sessionUser.is_admin
-      });
-      window.location.replace(API.landingPage(sessionUser));
-      return;
-    }
-    await sleep(250);
+  // The successful Google login response already contains the server-verified
+  // profile and installed session. Avoid a second network round trip.
+  const verified = API.normalizeUser(user);
+  if (!verified?.id || !verified.grade || !verified.class_number) {
+    showError('로그인 정보를 확인하지 못했습니다. 다시 시도해주세요.');
+    return;
   }
-
-  showError('로그인 세션을 확인하는 중 문제가 생겼습니다. 잠시 후 다시 시도해주세요.');
+  API.setUser(verified);
+  window.location.replace(API.landingPage(verified));
 }
 
     function showError(msg, { retryConfig = false } = {}) {
@@ -214,9 +197,9 @@ document.getElementById('googleProfileForm').addEventListener('submit', async (e
   }
 });
 
-    API.me().then(data => {
-      if (data && data.user_id) {
-        API.setUser({ id: data.user_id, name: data.name, grade: data.grade, class_number: data.class_number, profile_image_url: data.profile_image_url, is_alarm_enabled: data.is_alarm_enabled, can_complete_assignments: data.can_complete_assignments, is_admin: data.is_admin });
+    API.ensureUser().then(data => {
+      if (data?.id) {
+        API.setUser(data);
         window.location.href = API.landingPage(data);
       }
     }).catch(() => {});

@@ -31,6 +31,7 @@ let capturedInsert;
 let calendarReadFixtures = null;
 let rosterFixtures = null;
 let assignmentWriteFails = false;
+let userDeletionFails = false;
 const transactionCalls = [];
 let assignmentOwner = 1;
 let initiallyReadScope = { target_grade: 2, target_class: 2 };
@@ -72,6 +73,8 @@ const fakePool = {
     if (sql.startsWith('SELECT created_by, target_grade, target_class FROM assignments')) return [[{ created_by: assignmentOwner, ...initiallyReadScope }]];
     if (sql.startsWith('SELECT target_grade, target_class FROM assignments')) return [lockedScope ? [lockedScope] : []];
     if (sql.startsWith('INSERT INTO assignments')) return [{ insertId: 42 }];
+    if (sql.startsWith('INSERT INTO messages')) return [{ insertId: 71 }];
+    if (sql.startsWith('DELETE FROM assignments WHERE created_by') && userDeletionFails) throw new Error('test delete failure');
     if (sql.startsWith('INSERT IGNORE INTO user_assignments') && assignmentWriteFails) throw new Error('fan-out failed');
     if (sql.startsWith('SELECT user_id FROM users WHERE grade')) return [[]];
     return [[]];
@@ -380,4 +383,39 @@ test('admin calendars join only their own class completion and teacher rosters i
     assert.deepEqual(result.data.students.map(user => user.user_id), [1, 6]);
     assert.ok(result.data.students.every(user => user.google_sub === undefined && user.google_email === undefined));
   } finally { rosterFixtures = null; }
+});
+
+test('students publish notices only to their own grade or class while administrators choose the target', async () => {
+  for (const type of ['grade', 'class']) {
+    const before = queries.length;
+    const result = await request('/api/messages', { method: 'POST', token: session(1), body: { content: '학생 공지', type, target_grade: 3, target_class: 4, sender_id: 3 } });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.data.message_id, 71);
+    const write = queries.slice(before).find(query => query.sql.startsWith('INSERT INTO messages'));
+    assert.deepEqual(write.params, [1, '학생 공지', type, 1, type === 'class' ? 1 : null]);
+  }
+  const before = queries.length;
+  assert.equal((await request('/api/messages', { method: 'POST', token: session(2), body: { content: '관리자 공지', type: 'class', target_grade: 3, target_class: 4 } })).response.status, 200);
+  assert.deepEqual(queries.slice(before).find(query => query.sql.startsWith('INSERT INTO messages')).params, [2, '관리자 공지', 'class', 3, 4]);
+  assert.equal((await request('/api/messages', { method: 'POST', token: session(1), body: { content: 'bad', type: 'all' } })).response.status, 400);
+  assert.equal((await request('/api/messages', { method: 'POST', body: { content: 'anonymous', type: 'grade' } })).response.status, 401);
+});
+
+test('deleting a user atomically removes their created assignments and all related completion rows', async () => {
+  const before = queries.length, txBefore = transactionCalls.length;
+  const result = await request('/api/admin/users/3', { method: 'DELETE', token: session(2) });
+  assert.equal(result.response.status, 200);
+  const writes = queries.slice(before);
+  assert.ok(writes.some(query => query.sql.includes('FOR UPDATE') && query.params[0] === 3));
+  for (const prefix of ['DELETE FROM user_assignments WHERE user_id', 'DELETE FROM user_assignments WHERE assignment_id IN', 'DELETE FROM assignments WHERE created_by', 'DELETE FROM messages WHERE sender_id', 'DELETE FROM users WHERE user_id']) {
+    assert.ok(writes.some(query => query.sql.startsWith(prefix) && query.params[0] === 3), prefix);
+  }
+  assert.deepEqual(transactionCalls.slice(txBefore), ['begin', 'commit', 'release']);
+  userDeletionFails = true;
+  const rollbackBefore = transactionCalls.length;
+  try { assert.equal((await request('/api/admin/users/3', { method: 'DELETE', token: session(2) })).response.status, 500); }
+  finally { userDeletionFails = false; }
+  assert.deepEqual(transactionCalls.slice(rollbackBefore), ['begin', 'rollback', 'release']);
+  assert.equal((await request('/api/admin/users/2', { method: 'DELETE', token: session(2) })).response.status, 400);
+  assert.equal((await request('/api/admin/users/3', { method: 'DELETE', token: session(1) })).response.status, 403);
 });

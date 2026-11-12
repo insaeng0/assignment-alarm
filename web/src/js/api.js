@@ -188,6 +188,65 @@ const API = {
       if (!this.isLoginPage()) window.location.href = this.appPageUrl('login.html');
     });
   },
+  dataCache: new Map(),
+  dataCacheRevision: 0,
+  dataCacheIndexKey: 'assignment-data-index-v1',
+  dataCacheTtlMs: 5 * 60 * 1000,
+  userIdentity() {
+    const user = this.getUser();
+    return JSON.stringify(user ? [user.id, user.grade, user.class_number, user.is_admin, user.can_complete_assignments] : null);
+  },
+  dataCacheScope() {
+    const user = this.getUser();
+    if (!user?.id || (this.getAuthMode() === 'bearer' && !this.getToken())) return null;
+    return JSON.stringify([this.getAuthRealm() || this.getApiOrigin(), user.id, user.grade, user.class_number, user.is_admin, user.can_complete_assignments]);
+  },
+  dataCacheKey(value) {
+    const scope = this.dataCacheScope();
+    if (!scope) return null;
+    const url = this.apiUrl(value);
+    if (!/^\/api\/(?:assignments|messages|users\/[0-9]+\/assignments|admin\/(?:assignments|messages|users))$/.test(url.pathname)) return null;
+    if (url.pathname.startsWith('/api/admin/') && !this.getUser()?.is_admin) return null;
+    url.searchParams.sort();
+    return 'assignment-data:' + scope + ':' + url.pathname + url.search;
+  },
+  getCachedData(value) {
+    try {
+      const key = this.dataCacheKey(value);
+      if (!key) return null;
+      const record = this.dataCache.get(key) || JSON.parse(this.storageGet(key) || 'null');
+      if (!record || !Number.isFinite(record.savedAt) || record.savedAt > Date.now() + 5000 || Date.now() - record.savedAt > this.dataCacheTtlMs) return null;
+      if (!Array.isArray(record.data) && !Array.isArray(record.data?.items)) return null;
+      return JSON.parse(JSON.stringify(record.data));
+    } catch { return null; }
+  },
+  setCachedData(value, data) {
+    try {
+      if (!Array.isArray(data) && !Array.isArray(data?.items)) return false;
+      const key = this.dataCacheKey(value);
+      if (!key) return false;
+      const record = { savedAt: Date.now(), data };
+      const text = JSON.stringify(record);
+      if (text.length > 150000) return false;
+      this.dataCache.set(key, JSON.parse(text));
+      let index = JSON.parse(this.storageGet(this.dataCacheIndexKey) || '[]');
+      if (!Array.isArray(index)) index = [];
+      index = index.filter(item => typeof item === 'string' && item.startsWith('assignment-data:') && item !== key);
+      index.push(key);
+      while (index.length > 20) { const old = index.shift(); this.storageRemove(old); this.dataCache.delete(old); }
+      this.storageSet(key, text); this.storageSet(this.dataCacheIndexKey, JSON.stringify(index));
+      return true;
+    } catch { return false; }
+  },
+  invalidateDataCache() {
+    this.dataCacheRevision++;
+    this.dataCache.clear();
+    try {
+      const index = JSON.parse(this.storageGet(this.dataCacheIndexKey) || '[]');
+      if (Array.isArray(index)) for (const key of index) if (typeof key === 'string' && key.startsWith('assignment-data:')) this.storageRemove(key);
+    } catch {}
+    this.storageRemove(this.dataCacheIndexKey);
+  },
   isEmbedded() {
     try { return Boolean(window.top && window.self && window.top !== window.self); } catch { return true; }
   },
@@ -335,6 +394,7 @@ const API = {
   setUser(u) {
     const prevUser = this.getUser();
     const user = this.normalizeUser(u);
+    if (prevUser && ['id', 'grade', 'class_number', 'is_admin', 'can_complete_assignments'].some(key => String(prevUser[key]) !== String(user?.[key]))) this.invalidateDataCache();
     this.currentUser = user;
     this.storageSet('user', JSON.stringify(user));
     this.setCurrentUserFetchedAt();
@@ -343,6 +403,7 @@ const API = {
     }
   },
   clearUser() {
+    this.invalidateDataCache();
     const hadUser = Boolean(this.getUser());
     this.currentUser = null;
     this.storageRemove('user');
@@ -654,20 +715,30 @@ const API = {
         const renewal = await this.refreshRememberedSession();
         if (renewal.transient) return { success: false, code: renewal.code || 'NETWORK_ERROR', status: renewal.status, error: renewal.error };
       }
+      if (method !== 'GET' && !authControl) this.invalidateDataCache();
+      const cacheRevision = this.dataCacheRevision;
+      const cacheScope = this.dataCacheScope();
       const headers = { 'Content-Type': 'application/json' };
       const token = bearer && !publicEndpoint ? this.getToken() : null;
       if (token) headers.Authorization = 'Bearer ' + token;
       const sessionGeneration = this.logoutGeneration;
+      const requestIdentity = this.userIdentity();
       const loginLogoutMarker = this.getAuthRealm() ? this.storageGet('assignment-logout:' + this.getAuthRealm()) || '' : '';
+      const serialized = body === undefined ? undefined : JSON.stringify(body);
       const res = await fetch(target.toString(), {
         method,
         headers,
         credentials: bearer ? 'omit' : target.origin === window.location.origin ? 'same-origin' : 'include',
         redirect: 'error',
         signal: controller.signal,
-        body: body === undefined ? undefined : JSON.stringify(body)
+        body: serialized,
+        keepalive: !['GET', 'HEAD'].includes(method) && (!serialized || serialized.length <= 16000)
       });
       const isAuthRequest = ['/api/auth/login', '/api/auth/register', '/api/auth/google', '/api/auth/google/register'].includes(target.pathname);
+      if (!authControl && !publicEndpoint && (sessionGeneration !== this.logoutGeneration || requestIdentity !== this.userIdentity() || (bearer && token !== this.getToken() && (method === 'GET' || res.status === 401)))) {
+        if (sessionGeneration === this.logoutGeneration && !retried && (method === 'GET' || res.status === 401) && this.getUser()?.id) return this.request(method, url, body, { retried: true });
+        return { success: false, code: 'AUTH_CHANGED', error: '로그인 상태가 바뀌었습니다. 다시 시도해주세요.' };
+      }
       if (res.status === 401 && bearer && !authControl && !publicEndpoint && !retried) {
         this.clearToken();
         const renewal = await this.refreshRememberedSession();
@@ -683,8 +754,12 @@ const API = {
       try { data = await res.json(); } catch {
         return { success: false, status: res.status, error: '서버가 응답하지 않습니다. 잠시 후 다시 시도해주세요.' };
       }
+      if (sessionGeneration !== this.logoutGeneration) return { success: false, code: 'AUTH_CHANGED', error: '로그인 상태가 바뀌었습니다.' };
+      if (!authControl && !publicEndpoint && requestIdentity !== this.userIdentity()) {
+        if (method === 'GET' && !retried && this.getUser()?.id) return this.request(method, url, body, { retried: true });
+        return { success: false, code: 'AUTH_CHANGED', error: '로그인 상태가 바뀌었습니다.' };
+      }
       if (!res.ok) {
-
         return { success: false, status: res.status, code: data?.code, error: data?.error || '요청을 처리하지 못했습니다. 다시 시도해주세요.' };
       }
       if (bearer && isAuthRequest && data?.user) {
@@ -692,6 +767,8 @@ const API = {
           if (!await this.installLoginSession(data, { generation: sessionGeneration, logoutMarker: loginLogoutMarker })) return { success: false, error: '로그인 처리가 취소되었습니다.' };
         } catch (error) { return { success: false, code: error.code || 'PERSISTENCE_ERROR', error: error.message || '로그인 유지 정보를 저장하지 못했습니다.' }; }
       }
+      if (method === 'GET' && cacheRevision === this.dataCacheRevision && cacheScope && cacheScope === this.dataCacheScope()) this.setCachedData(url, data);
+      if (method !== 'GET' && !authControl) this.invalidateDataCache();
       return data;
     } catch (error) {
       if (error?.code === 'API_CONFIG') return { success: false, code: 'API_CONFIG', error: error.message };
@@ -806,7 +883,14 @@ const API = {
     }
 
     if (!this.currentUserRequest) {
-      this.currentUserRequest = this.me()
+      this.currentUserRequest = (async () => {
+        if (this.getAuthMode() === 'bearer' && !this.getToken()) {
+          const renewal = await this.refreshRememberedSession();
+          if (renewal.refreshed && this.getUser()?.id) return this.getUser();
+          if (renewal.transient) throw new Error(renewal.error);
+        }
+        return this.me();
+      })()
         .then((serverUser) => {
           if (serverUser?.error && serverUser.status !== 401) throw new Error(serverUser.error);
           const user = this.normalizeUser(serverUser);
@@ -816,7 +900,7 @@ const API = {
           }
           this.clearToken();
           this.clearUser();
-          window.location.href = this.appPageUrl('login.html');
+          if (!this.isLoginPage()) window.location.href = this.appPageUrl('login.html');
           return null;
         })
         .finally(() => { this.currentUserRequest = null; });

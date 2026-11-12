@@ -555,3 +555,70 @@ test('concurrent requests share renewal and logout prevents a late refresh from 
   await late.api.logout(); release(); await renewal;
   assert.equal(late.api.getToken(), null); assert.equal(f.indexedDB.records.size, 0);
 });
+
+test('list cache renders across page contexts but is scoped to identity, class, role and freshness', async () => {
+  const storageMap = new Map(), sessionMap = new Map();
+  const setup = extra => createAPI({ config: persistentConfig, storageMap, sessionMap, fetch: async () => response([{ assignment_id: 3, title: 'cached' }]), ...extra });
+  const first = setup(); first.api.setToken(token, expiresAt()); first.api.setUser({ id: 2, grade: 1, class_number: 1, can_complete_assignments: true });
+  await first.api.getAssignments();
+  const next = setup();
+  assert.equal(next.api.getCachedData('/api/assignments')[0].title, 'cached');
+  next.api.setUser({ id: 2, grade: 1, class_number: 2, can_complete_assignments: true });
+  assert.equal(next.api.getCachedData('/api/assignments'), null);
+  next.api.setCachedData('/api/assignments', [{ assignment_id: 5 }]);
+  next.api.clearUser(); assert.equal(next.api.getCachedData('/api/assignments'), null);
+  assert.ok(![...storageMap.keys()].some(key => key.startsWith('assignment-data:')));
+});
+test('cache canonicalizes queries and never stores an older read across a write', async () => {
+  let finish;
+  const { api } = createAPI({ fetch: async (_url, options) => options.method === 'GET' ? new Promise(resolve => { finish = resolve; }) : response({ success: true }) });
+  api.setUser({ id: 2, grade: 1, class_number: 1, is_admin: true });
+  api.setCachedData('/api/admin/users?page=1&pageSize=10', { items: [{ user_id: 3 }], total: 1 });
+  assert.equal(api.getCachedData('/api/admin/users?pageSize=10&page=1').total, 1);
+  const read = api.getAssignments();
+  await api.createAssignment({ title: 'new' });
+  finish(response([{ assignment_id: 1 }])); await read;
+  assert.equal(api.getCachedData('/api/assignments'), null);
+});
+test('small mutations use keepalive and successful writes are never repeated after concurrent token renewal', async () => {
+  let finish, count = 0, saved;
+  const { api } = createAPI({ config: persistentConfig, fetch: async (_url, options) => { count++; saved = options; return new Promise(resolve => { finish = resolve; }); } });
+  api.setToken(token, expiresAt()); api.setUser({ id: 2, grade: 1, class_number: 1 });
+  const write = api.createAssignment({ title: 'hello' });
+  api.setToken('new.payload.signature', expiresAt()); finish(response({ success: true, assignment_id: 7 }));
+  assert.equal((await write).assignment_id, 7); assert.equal(count, 1); assert.equal(saved.keepalive, true);
+});
+test('remembered restoration uses its authoritative profile without a redundant me request', async () => {
+  const f = persistentFixture(); await f.open().api.googleAuth('credential');
+  f.requests.length = 0;
+  const fresh = f.open();
+  const user = await fresh.api.ensureUser(); assert.equal(user.id, 2);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/auth/refresh')).length, 1);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/auth/me')).length, 0);
+});
+
+test('a profile response whose body arrives after logout cannot restore the old identity', async () => {
+  let finishBody, started;
+  const begun = new Promise(done => { started = done; });
+  const { api } = createAPI({ fetch: async () => ({ status: 200, ok: true, json: () => { started(); return new Promise(done => { finishBody = done; }); } }) });
+  api.setUser({ id: 1, grade: 1, class_number: 1 });
+  const read = api.me(); await begun;
+  api.logoutGeneration++; api.clearUser();
+  finishBody({ user_id: 1, grade: 1, class_number: 1 });
+  assert.equal((await read).code, 'AUTH_CHANGED'); assert.equal(api.getUser(), null);
+});
+
+test('a signed-out login page never reloads itself and successful login finalizes without another profile lookup', async () => {
+  const ui = flowDocument(); let profileReads = 0;
+  const { api, window, context } = createAPI({ pathname: '/assignment/login.html', document: ui.document, fetch: async url => {
+    if (url.endsWith('/auth/me')) { profileReads++; return response({ error: 'not logged in' }, 401); }
+    return response({ googleClientId: null, authMode: 'cookie' });
+  } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/login.js'), 'utf8'), context);
+  await new Promise(setImmediate);
+  assert.equal(window.location.href, ''); assert.equal(profileReads, 1);
+  api.me = async () => { throw new Error('redundant profile read'); };
+  context.verifiedUser = { id: 8, grade: 1, class_number: 2, can_complete_assignments: true };
+  await vm.runInContext('finalizeGoogleLogin(verifiedUser)', context);
+  assert.equal(window.location.replaced, '/assignment/calendar.html');
+});

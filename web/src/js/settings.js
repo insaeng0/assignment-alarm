@@ -34,12 +34,258 @@ API.initTheme();
         }
       };
 
+    let alarmOperation = null;
+    const adminUserUpdates = new Map();
+    const adminUserDrafts = new Map();
+    const adminDeletes = { assignment: new Map(), message: new Map(), user: new Map() };
+    const adminListFields = {
+      assignment: { items: 'assignments', id: 'assignment_id', total: 'assignmentTotal', page: 'assignmentPage', pager: 'adminAssignmentPager' },
+      message: { items: 'messages', id: 'message_id', total: 'messageTotal', page: 'messagePage', pager: 'adminMessagePager' },
+      user: { items: 'users', id: 'user_id', total: 'userTotal', page: 'userPage', pager: 'adminUserPager' }
+    };
+    let lastSettingsScope = null;
+    function settingsScope() {
+      const user = API.getUser();
+      let backend = '';
+      try { backend = API.getAuthRealm?.() || API.getApiOrigin?.() || ''; } catch {}
+      return JSON.stringify([backend, user?.id, user?.grade, user?.class_number, user?.is_admin, user?.can_complete_assignments]);
+    }
+    function syncSettingsScope() {
+      const next = settingsScope();
+      if (lastSettingsScope === next) return next;
+      const previous = lastSettingsScope;
+      lastSettingsScope = next;
+      if (previous === null) return next;
+      adminUserUpdates.clear();
+      adminUserDrafts.clear();
+      for (const kind of ['assignment', 'message', 'user']) {
+        const fields = adminListFields[kind];
+        adminDeletes[kind].clear();
+        adminLoadVersions[kind] += 1;
+        adminSettingsState[fields.items] = [];
+        adminSettingsState[fields.total] = 0;
+        adminSettingsState.adminLoaded[kind] = false;
+        document.getElementById(fields.pager).innerHTML = '';
+        document.getElementById({ assignment: 'adminAssignmentList', message: 'adminMessageList', user: 'adminUserList' }[kind]).innerHTML = '';
+      }
+      for (const field of ['assignmentStatusById', 'assignmentStatusLoading', 'assignmentStatusOpen', 'assignmentStatusFilterById']) adminSettingsState[field] = {};
+      for (const id of ['adminAssignmentSection', 'adminMessageSection', 'adminUserSection']) document.getElementById(id).style.display = API.normalizeFlag(API.getUser()?.is_admin) ? 'block' : 'none';
+      if (alarmOperation && !sameAccount(alarmOperation.accountId)) {
+        alarmOperation = null;
+        document.getElementById('alarmToggle').disabled = false;
+        document.getElementById('alarmToggle').setAttribute('aria-busy', 'false');
+      }
+      return next;
+    }
+
+    function sameAccount(accountId) { return Number(API.getUser()?.id) === Number(accountId); }
+    function canStartAdminOperation() {
+      if (!API.normalizeFlag(API.getUser()?.is_admin)) return false;
+      const count = adminUserUpdates.size + Object.values(adminDeletes).reduce((sum, pending) => sum + pending.size, 0);
+      if (count < 20) return true;
+      AppUI.toast('저장 중인 작업을 마친 뒤 다시 시도해주세요.', true);
+      return false;
+    }
+    function adminViewKey(kind) {
+      const state = adminSettingsState;
+      if (kind === 'assignment') return JSON.stringify([state.assignmentPage, state.assignmentGrade, state.assignmentClass]);
+      if (kind === 'message') return JSON.stringify([state.messagePage, state.messageType, state.messageGrade, state.messageClass]);
+      return String(state.userPage);
+    }
+    function renderAdminList(kind) {
+      ({ assignment: renderAdminAssignments, message: renderAdminMessages, user: renderAdminUsers })[kind]();
+      const fields = adminListFields[kind];
+      renderPagination(fields.pager, kind, adminSettingsState[fields.page], adminSettingsState[fields.total], adminSettingsState.pageSize);
+    }
+    function overlayAdminResponse(kind, response) {
+      const fields = adminListFields[kind];
+      const pending = adminDeletes[kind];
+      const key = adminViewKey(kind);
+      let hidden = 0;
+      for (const operation of pending.values()) operation.totalViewKey = null;
+      const items = response.items.filter(record => {
+        const operation = pending.get(Number(record[fields.id]));
+        if (!operation) return true;
+        operation.totalViewKey = key;
+        hidden += 1;
+        return false;
+      }).map(record => {
+        const operation = kind === 'user' ? adminUserUpdates.get(Number(record.user_id)) : null;
+        return operation ? { ...record, ...operation.payload } : record;
+      });
+      // Subtract only records present in this response: a server read may have
+      // already observed a delete whose write response has not arrived yet.
+      return { items, total: Math.max(0, (Number(response.total) || 0) - hidden) };
+    }
+    function reloadAdminInBackground(kind) {
+      const loader = { assignment: loadAdminAssignments, message: loadAdminMessages, user: loadAdminUsers }[kind];
+      loader({ keepVisible: true }).catch(() => AppUI.toast('변경은 저장됐지만 목록을 새로고침하지 못했습니다.', true));
+    }
+    function showCachedAdminList(kind, params) {
+      syncSettingsScope();
+      if (typeof API.getCachedData !== 'function' || !API.normalizeFlag(API.getUser()?.is_admin)) return false;
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(params)) if (value) query.set(key, String(value));
+      const endpoint = { assignment: 'assignments', message: 'messages', user: 'users' }[kind];
+      let cached;
+      try { cached = API.getCachedData(`/api/admin/${endpoint}?${query}`); } catch { return false; }
+      if (!Array.isArray(cached?.items)) return false;
+      const visible = overlayAdminResponse(kind, cached);
+      const fields = adminListFields[kind];
+      adminSettingsState[fields.items] = visible.items;
+      adminSettingsState[fields.total] = visible.total;
+      renderAdminList(kind);
+      return true;
+    }
+    function reconcileDeletedUserContent(userId) {
+      for (const [kind, owner] of [['assignment', 'created_by'], ['message', 'sender_id']]) {
+        const fields = adminListFields[kind];
+        const records = adminSettingsState[fields.items];
+        const remaining = records.filter(record => Number(record[owner]) !== userId);
+        adminSettingsState[fields.items] = remaining;
+        adminSettingsState[fields.total] = Math.max(0, adminSettingsState[fields.total] - (records.length - remaining.length));
+        adminSettingsState.adminLoaded[kind] = false;
+        // A confirmed account cascade is authoritative even if an individual
+        // delete response is still pending. It must not resurrect that content.
+        for (const [id, operation] of adminDeletes[kind]) {
+          if (Number(operation.record[owner]) === userId) adminDeletes[kind].delete(id);
+        }
+        adminLoadVersions[kind] += 1;
+        renderAdminList(kind);
+        const panel = document.getElementById(kind === 'assignment' ? 'adminAssignmentPanel' : 'adminMessagePanel');
+        if (panel?.classList.contains('show')) reloadAdminInBackground(kind);
+      }
+      API.refreshNotifications().catch(() => {});
+    }
+
+    async function deleteAdminRecord(kind, id, request) {
+      syncSettingsScope();
+      if (!canStartAdminOperation() || adminDeletes[kind].has(id) || (kind === 'user' && adminUserUpdates.has(id))) return;
+      const fields = adminListFields[kind];
+      const index = adminSettingsState[fields.items].findIndex(record => Number(record[fields.id]) === id);
+      if (index < 0) return;
+      const record = adminSettingsState[fields.items][index];
+      if (kind === 'user' && API.normalizeFlag(record.is_admin)) return;
+      const viewKey = adminViewKey(kind);
+      const existing = [...adminDeletes[kind].values()].find(operation => operation.viewKey === viewKey);
+      const order = existing?.order || adminSettingsState[fields.items].map(item => Number(item[fields.id]));
+      const operation = { record, index, order, accountId: API.getUser().id, viewKey, totalViewKey: viewKey };
+      adminDeletes[kind].set(id, operation);
+      adminLoadVersions[kind] += 1;
+      adminSettingsState[fields.items] = adminSettingsState[fields.items].filter(item => Number(item[fields.id]) !== id);
+      adminSettingsState[fields.total] = Math.max(0, adminSettingsState[fields.total] - 1);
+      renderAdminList(kind);
+      try {
+        const result = await request(id);
+        if (!result?.success) throw new Error(result?.error || '삭제하지 못했습니다.');
+        syncSettingsScope();
+        if (adminDeletes[kind].get(id) !== operation) return;
+        adminDeletes[kind].delete(id);
+        adminLoadVersions[kind] += 1;
+        if (!sameAccount(operation.accountId)) return;
+        if (kind === 'user') {
+          adminUserDrafts.delete(id);
+          reconcileDeletedUserContent(id);
+        }
+        AppUI.toast('삭제했습니다.');
+        reloadAdminInBackground(kind);
+        if (kind !== 'user') API.refreshNotifications().catch(() => {});
+      } catch (error) {
+        syncSettingsScope();
+        if (adminDeletes[kind].get(id) !== operation) return;
+        adminDeletes[kind].delete(id);
+        adminLoadVersions[kind] += 1;
+        if (!sameAccount(operation.accountId)) return;
+        const records = adminSettingsState[fields.items];
+        if (adminViewKey(kind) === operation.viewKey && !records.some(item => Number(item[fields.id]) === id)) {
+          const rank = operation.order.indexOf(id);
+          const next = operation.order.slice(rank + 1).find(candidate => records.some(item => Number(item[fields.id]) === candidate));
+          const position = next === undefined ? records.length : records.findIndex(item => Number(item[fields.id]) === next);
+          records.splice(position, 0, operation.record);
+        }
+        if (operation.totalViewKey === adminViewKey(kind)) adminSettingsState[fields.total] += 1;
+        renderAdminList(kind);
+        AppUI.toast((error?.message || '삭제하지 못했습니다.') + ' 화면을 원래대로 돌렸습니다.', true);
+      }
+    }
+
+    async function saveAdminUser(userId, payload) {
+      syncSettingsScope();
+      if (!canStartAdminOperation() || adminUserUpdates.has(userId) || adminDeletes.user.has(userId)) return;
+      const index = adminSettingsState.users.findIndex(user => Number(user.user_id) === userId);
+      if (index < 0) return;
+      if (!Number.isInteger(payload.grade) || payload.grade < 1 || payload.grade > 3 || !Number.isInteger(payload.class_number) || payload.class_number < 1 || payload.class_number > 4) {
+        AppUI.toast('학년과 반을 확인해주세요.', true);
+        return;
+      }
+      const operation = { before: adminSettingsState.users[index], payload, accountId: API.getUser().id };
+      adminUserUpdates.set(userId, operation);
+      adminLoadVersions.user += 1;
+      adminSettingsState.users[index] = { ...operation.before, ...payload };
+      renderAdminUsers();
+      try {
+        const result = await API.updateAdminUser(userId, payload);
+        if (!result?.success) throw new Error(result?.error || '사용자 정보를 저장하지 못했습니다.');
+        syncSettingsScope();
+        if (adminUserUpdates.get(userId) !== operation) return;
+        adminUserUpdates.delete(userId);
+        adminUserDrafts.delete(userId);
+        adminLoadVersions.user += 1;
+        if (!sameAccount(operation.accountId)) return;
+        if (Number(API.getUser()?.id) === userId) {
+          API.setUser({ ...API.getUser(), ...payload });
+          syncSettingsScope();
+          loadProfile(API.getUser()).catch(() => {});
+        }
+        renderAdminUsers();
+        AppUI.toast('사용자 정보를 저장했습니다.');
+        reloadAdminInBackground('user');
+      } catch (error) {
+        syncSettingsScope();
+        if (adminUserUpdates.get(userId) !== operation) return;
+        adminUserUpdates.delete(userId);
+        adminUserDrafts.delete(userId);
+        adminLoadVersions.user += 1;
+        if (!sameAccount(operation.accountId)) return;
+        adminSettingsState.users = adminSettingsState.users.map(user => {
+          if (Number(user.user_id) !== userId) return user;
+          const restored = { ...user };
+          for (const field of ['grade', 'class_number']) {
+            if (Number(user[field]) === payload[field]) restored[field] = operation.before[field];
+          }
+          return restored;
+        });
+        renderAdminUsers();
+        AppUI.toast((error?.message || '사용자 정보를 저장하지 못했습니다.') + ' 변경 내용을 되돌렸습니다.', true);
+      }
+    }
+
     async function init() {
+      syncSettingsScope();
+      const cached = API.getUser();
+      if (cached) {
+        loadProfile(cached).catch(() => {});
+        if (API.normalizeFlag(cached.is_admin)) {
+          document.getElementById('adminAssignmentSection').style.display = 'block';
+          document.getElementById('adminMessageSection').style.display = 'block';
+          document.getElementById('adminUserSection').style.display = 'block';
+          initAdminSelectors();
+          showCachedAdminList('assignment', {
+            page: adminSettingsState.assignmentPage, pageSize: adminSettingsState.pageSize,
+            grade: adminSettingsState.assignmentGrade, class_number: adminSettingsState.assignmentClass
+          });
+        }
+      }
       const user = await API.ensureUser();
       if (!user) return;
+      syncSettingsScope();
       API.loadUserInfo();
       API.initNotifications().catch(() => {});
       await loadProfile(user);
+      if (!API.normalizeFlag(user.is_admin)) {
+        for (const id of ['adminAssignmentSection', 'adminMessageSection', 'adminUserSection']) document.getElementById(id).style.display = 'none';
+        for (const kind of ['assignment', 'message', 'user']) adminLoadVersions[kind] += 1;
+      }
         if (user.is_admin) {
           document.getElementById('adminAssignmentSection').style.display = 'block';
           document.getElementById('adminMessageSection').style.display = 'block';
@@ -90,7 +336,8 @@ API.initTheme();
       }
 
       const toggle = document.getElementById('alarmToggle');
-      const alarmEnabled = API.normalizeFlag(data.is_alarm_enabled);
+      const pendingAlarm = alarmOperation && Number(alarmOperation.accountId) === Number(data.id || data.user_id);
+      const alarmEnabled = pendingAlarm ? alarmOperation.newValue : API.normalizeFlag(data.is_alarm_enabled);
       toggle.classList.toggle('on', alarmEnabled);
       toggle.setAttribute('aria-checked', String(alarmEnabled));
 
@@ -104,6 +351,7 @@ API.initTheme();
         user.grade = data.grade;
         user.class_number = data.class_number;
         user.is_admin = API.normalizeFlag(data.is_admin);
+        if (pendingAlarm) user.is_alarm_enabled = alarmOperation.newValue;
         API.setUser(user);
       }
     }
@@ -278,22 +526,29 @@ API.initTheme();
       }).join('');
     }
 
-      async function loadAdminAssignments() {
+      async function loadAdminAssignments({ keepVisible = false } = {}) {
+        const requestScope = syncSettingsScope();
         const version = ++adminLoadVersions.assignment;
-        const res = await API.getAdminAssignments({
+        const accountId = API.getUser()?.id;
+        const params = {
           page: adminSettingsState.assignmentPage,
         pageSize: adminSettingsState.pageSize,
         grade: adminSettingsState.assignmentGrade,
         class_number: adminSettingsState.assignmentClass
-      });
-      if (version !== adminLoadVersions.assignment) return;
+      };
+      keepVisible = showCachedAdminList('assignment', params) || keepVisible;
+      const res = await API.getAdminAssignments(params);
+      syncSettingsScope();
+      if (requestScope !== settingsScope() || version !== adminLoadVersions.assignment || !sameAccount(accountId) || !API.normalizeFlag(API.getUser()?.is_admin)) return;
       if (!Array.isArray(res?.items)) {
+        if (keepVisible) { AppUI.toast('최신 과제 목록을 불러오지 못해 표시된 내용을 유지합니다.', true); return; }
         document.getElementById('adminAssignmentList').innerHTML = `<div class="empty-state">${API.escapeHTML(res?.error || '과제 목록을 불러오지 못했습니다.')}<br><button class="btn btn-secondary btn-sm" type="button" data-retry-admin="assignment">다시 시도</button></div>`;
         document.getElementById('adminAssignmentPager').innerHTML = '';
         return;
       }
-      adminSettingsState.assignments = Array.isArray(res?.items) ? res.items : [];
-      adminSettingsState.assignmentTotal = Number(res?.total) || 0;
+      const visible = overlayAdminResponse('assignment', res);
+      adminSettingsState.assignments = visible.items;
+      adminSettingsState.assignmentTotal = visible.total;
       adminSettingsState.assignmentPage = Number(res?.page) || 1;
         if (adminSettingsState.assignments.length === 0 && adminSettingsState.assignmentTotal > 0 && adminSettingsState.assignmentPage > 1) {
           adminSettingsState.assignmentPage -= 1;
@@ -307,6 +562,7 @@ API.initTheme();
 
     async function toggleAssignmentStatusView(assignmentId) {
       if (!assignmentId) return;
+      const requestScope = syncSettingsScope();
 
       if (adminSettingsState.assignmentStatusOpen[assignmentId]) {
         adminSettingsState.assignmentStatusOpen[assignmentId] = false;
@@ -321,6 +577,8 @@ API.initTheme();
         renderAdminAssignments();
 
         const res = await API.getAssignmentStatus(assignmentId);
+        syncSettingsScope();
+        if (requestScope !== settingsScope()) return;
         if (!res || res.error) {
           adminSettingsState.assignmentStatusById[assignmentId] = {
             error: res?.error || '제출 현황을 불러오지 못했습니다.',
@@ -335,23 +593,30 @@ API.initTheme();
       renderAdminAssignments();
     }
 
-      async function loadAdminMessages() {
+      async function loadAdminMessages({ keepVisible = false } = {}) {
+        const requestScope = syncSettingsScope();
         const version = ++adminLoadVersions.message;
-        const res = await API.getAdminMessages({
+        const accountId = API.getUser()?.id;
+        const params = {
         page: adminSettingsState.messagePage,
         pageSize: adminSettingsState.pageSize,
         type: adminSettingsState.messageType,
         grade: adminSettingsState.messageGrade,
         class_number: adminSettingsState.messageType === 'class' ? adminSettingsState.messageClass : null
-      });
-      if (version !== adminLoadVersions.message) return;
+      };
+      keepVisible = showCachedAdminList('message', params) || keepVisible;
+      const res = await API.getAdminMessages(params);
+      syncSettingsScope();
+      if (requestScope !== settingsScope() || version !== adminLoadVersions.message || !sameAccount(accountId) || !API.normalizeFlag(API.getUser()?.is_admin)) return;
       if (!Array.isArray(res?.items)) {
+        if (keepVisible) { AppUI.toast('최신 공지 목록을 불러오지 못해 표시된 내용을 유지합니다.', true); return; }
         document.getElementById('adminMessageList').innerHTML = `<div class="empty-state">${API.escapeHTML(res?.error || '메세지 목록을 불러오지 못했습니다.')}<br><button class="btn btn-secondary btn-sm" type="button" data-retry-admin="message">다시 시도</button></div>`;
         document.getElementById('adminMessagePager').innerHTML = '';
         return;
       }
-      adminSettingsState.messages = Array.isArray(res?.items) ? res.items : [];
-      adminSettingsState.messageTotal = Number(res?.total) || 0;
+      const visible = overlayAdminResponse('message', res);
+      adminSettingsState.messages = visible.items;
+      adminSettingsState.messageTotal = visible.total;
       adminSettingsState.messagePage = Number(res?.page) || 1;
         if (adminSettingsState.messages.length === 0 && adminSettingsState.messageTotal > 0 && adminSettingsState.messagePage > 1) {
           adminSettingsState.messagePage -= 1;
@@ -372,8 +637,10 @@ API.initTheme();
 
       container.innerHTML = users.map(user => {
         const admin = API.normalizeFlag(user.is_admin);
+        const saving = adminUserUpdates.has(Number(user.user_id));
+        const draft = saving ? adminUserUpdates.get(Number(user.user_id)).payload : adminUserDrafts.get(Number(user.user_id));
         return `
-        <div class="admin-user-item" data-id="${Number(user.user_id)}">
+        <div class="admin-user-item" data-id="${Number(user.user_id)}" aria-busy="${saving}">
           <div class="admin-user-top">
             <strong>${API.escapeHTML(user.name)}</strong>
             <span class="admin-role-badge ${admin ? 'admin' : 'student'}">${admin ? (API.normalizeFlag(user.can_complete_assignments) ? '학생 관리자' : '관리자') : '학생'}</span>
@@ -386,38 +653,45 @@ API.initTheme();
               </div>
             <div class="form-group">
               <label>학년</label>
-              <select aria-label="사용자 학년" class="admin-grade-select">${adminUserOptions(3, '학년', user.grade)}</select>
+              <select aria-label="사용자 학년" class="admin-grade-select" ${saving ? 'disabled' : ''}>${adminUserOptions(3, '학년', draft?.grade ?? user.grade)}</select>
             </div>
             <div class="form-group">
               <label>반</label>
-              <select aria-label="사용자 반" class="admin-class-select">${adminUserOptions(4, '반', user.class_number)}</select>
+              <select aria-label="사용자 반" class="admin-class-select" ${saving ? 'disabled' : ''}>${adminUserOptions(4, '반', draft?.class_number ?? user.class_number)}</select>
             </div>
           </div>
           <div class="admin-user-meta">생성일 ${new Date(user.created_at).toLocaleString('ko-KR')}</div>
           <div class="admin-user-actions">
-            <button class="btn btn-primary btn-sm save-admin-user">저장</button>
-            ${admin ? '' : '<button class="btn btn-danger btn-sm delete-admin-user">삭제</button>'}
+            <button class="btn btn-primary btn-sm save-admin-user" ${saving ? 'disabled' : ''}>${saving ? '저장 중…' : '저장'}</button>
+            ${admin ? '' : `<button class="btn btn-danger btn-sm delete-admin-user" ${saving ? 'disabled' : ''}>삭제</button>`}
           </div>
         </div>
       `;
       }).join('');
     }
 
-      async function loadAdminUsers() {
+      async function loadAdminUsers({ keepVisible = false } = {}) {
+        const requestScope = syncSettingsScope();
         const version = ++adminLoadVersions.user;
-        const res = await API.getAdminUsers({
+        const accountId = API.getUser()?.id;
+        const params = {
         page: adminSettingsState.userPage,
         pageSize: adminSettingsState.pageSize
-      });
-      if (version !== adminLoadVersions.user) return;
+      };
+      keepVisible = showCachedAdminList('user', params) || keepVisible;
+      const res = await API.getAdminUsers(params);
+      syncSettingsScope();
+      if (requestScope !== settingsScope() || version !== adminLoadVersions.user || !sameAccount(accountId) || !API.normalizeFlag(API.getUser()?.is_admin)) return;
       if (!Array.isArray(res?.items)) {
+        if (keepVisible) { AppUI.toast('최신 사용자 목록을 불러오지 못해 표시된 내용을 유지합니다.', true); return; }
         document.getElementById('adminUserList').innerHTML = `<div class="empty-state">${API.escapeHTML(res?.error || '유저 목록을 불러오지 못했습니다.')}<br><button class="btn btn-secondary btn-sm" type="button" data-retry-admin="user">다시 시도</button></div>`;
         document.getElementById('adminUserPager').innerHTML = '';
         return;
       }
 
-      adminSettingsState.users = res.items;
-      adminSettingsState.userTotal = Number(res?.total) || 0;
+      const visible = overlayAdminResponse('user', res);
+      adminSettingsState.users = visible.items;
+      adminSettingsState.userTotal = visible.total;
       adminSettingsState.userPage = Number(res?.page) || 1;
         if (adminSettingsState.users.length === 0 && adminSettingsState.userTotal > 0 && adminSettingsState.userPage > 1) {
           adminSettingsState.userPage -= 1;
@@ -429,20 +703,41 @@ API.initTheme();
       }
 
     document.getElementById('alarmToggle').addEventListener('click', async function() {
-      if (this.disabled) return;
+      if (this.disabled || alarmOperation) return;
       const user = API.getUser();
       if (!user) return;
-      const newValue = !this.classList.contains('on');
+      const before = this.classList.contains('on');
+      const newValue = !before;
+      const operation = { accountId: user.id, before, newValue };
+      alarmOperation = operation;
       this.disabled = true;
+      this.classList.toggle('on', newValue);
+      this.setAttribute('aria-checked', String(newValue));
+      this.setAttribute('aria-busy', 'true');
+      API.setUser({ ...API.getUser(), is_alarm_enabled: newValue });
       try {
         const result = await API.updateUser(user.id, { is_alarm_enabled: newValue ? 1 : 0 });
         if (!result?.success) throw new Error(result?.error || '알림 설정을 저장하지 못했습니다.');
-        this.classList.toggle('on', newValue);
-        this.setAttribute('aria-checked', String(newValue));
-        API.setUser({ ...user, is_alarm_enabled: newValue });
-        AppUI.toast(newValue ? '과제 알림을 켰습니다.' : '과제 알림을 껐습니다.');
-      } catch (error) { AppUI.toast(error.message || '설정 저장에 실패했습니다.', true); }
-      finally { this.disabled = false; }
+        if (alarmOperation === operation && sameAccount(operation.accountId)) {
+          AppUI.toast(newValue ? '과제 알림을 켰습니다.' : '과제 알림을 껐습니다.');
+        }
+      } catch (error) {
+        if (alarmOperation === operation && sameAccount(operation.accountId)) {
+          const current = API.getUser();
+          if (API.normalizeFlag(current?.is_alarm_enabled) === newValue) {
+            API.setUser({ ...current, is_alarm_enabled: before });
+            this.classList.toggle('on', before);
+            this.setAttribute('aria-checked', String(before));
+          }
+          AppUI.toast((error?.message || '설정 저장에 실패했습니다.') + ' 알림 설정을 되돌렸습니다.', true);
+        }
+      } finally {
+        if (alarmOperation === operation) {
+          alarmOperation = null;
+          this.disabled = false;
+          this.setAttribute('aria-busy', 'false');
+        }
+      }
     });
 
     function updateThemeHelpText(theme, resolvedTheme) {
@@ -469,42 +764,33 @@ API.initTheme();
       updateThemeHelpText(currentTheme, resolvedTheme);
     });
 
-    document.getElementById('adminUserList').addEventListener('click', async (e) => {
+    document.getElementById('adminUserList').addEventListener('change', (event) => {
+      if (!event.target.classList.contains('admin-grade-select') && !event.target.classList.contains('admin-class-select')) return;
+      const item = event.target.closest('.admin-user-item');
+      const id = Number(item?.dataset.id);
+      if (!id || adminUserUpdates.has(id)) return;
+      adminUserDrafts.set(id, {
+        grade: Number(item.querySelector('.admin-grade-select').value),
+        class_number: Number(item.querySelector('.admin-class-select').value)
+      });
+    });
+    document.getElementById('adminUserList').addEventListener('click', async (event) => {
       if (!API.normalizeFlag(API.getUser()?.is_admin)) return;
-      const item = e.target.closest('.admin-user-item');
-      if (!item) return;
-      const userId = parseInt(item.dataset.id, 10);
+      const item = event.target.closest('.admin-user-item');
+      const userId = Number(item?.dataset.id);
       if (!userId) return;
-
-        if (e.target.classList.contains('save-admin-user')) {
-          const button = e.target;
-          if (button.disabled) return;
-          const current = adminSettingsState.users.find(user => Number(user.user_id) === userId);
-          if (!current) { alert('사용자 목록을 새로고침한 뒤 다시 시도해주세요.'); return; }
-          const payload = {
-            grade: parseInt(item.querySelector('.admin-grade-select').value, 10),
-            class_number: parseInt(item.querySelector('.admin-class-select').value, 10)
-          };
-          button.disabled = true;
-          try {
-            const res = await API.updateAdminUser(userId, payload);
-            if (!res || res.error) { alert(res?.error || '저장에 실패했습니다.'); return; }
-            alert('사용자 정보가 저장되었습니다.');
-            await loadAdminUsers();
-          } catch { alert('사용자 정보를 저장하지 못했습니다. 다시 시도해주세요.'); }
-          finally { button.disabled = false; }
-          return;
-        }
-
-      if (e.target.classList.contains('delete-admin-user')) {
-        if (!confirm('정말 이 계정을 삭제하시겠습니까?')) return;
-        const res = await API.deleteAdminUser(userId);
-        if (!res || res.error) {
-          alert(res?.error || '삭제에 실패했습니다.');
-          return;
-        }
-        await loadAdminUsers();
+      const save = event.target.closest('.save-admin-user');
+      if (save) {
+        if (save.disabled) return;
+        return saveAdminUser(userId, {
+          grade: Number(item.querySelector('.admin-grade-select').value),
+          class_number: Number(item.querySelector('.admin-class-select').value)
+        });
       }
+      const remove = event.target.closest('.delete-admin-user');
+      if (!remove || remove.disabled || adminDeletes.user.has(userId) || adminUserUpdates.has(userId)) return;
+      if (!confirm('이 계정과 이 사용자가 등록한 과제·공지, 관련 제출 기록을 모두 삭제하시겠습니까? 삭제하면 되돌릴 수 없습니다.')) return;
+      return deleteAdminRecord('user', userId, id => API.deleteAdminUser(id));
     });
 
     document.getElementById('adminAssignmentList').addEventListener('click', async (e) => {
@@ -522,27 +808,18 @@ API.initTheme();
       }
 
       const deleteButton = e.target.closest('.delete-admin-assignment');
-      if (!deleteButton) return;
-      if (!confirm('정말 이 과제를 삭제하시겠습니까?')) return;
-      const res = await API.deleteAssignment(parseInt(deleteButton.dataset.id, 10));
-      if (!res || res.error) {
-        alert(res?.error || '과제 삭제에 실패했습니다.');
-        return;
-      }
-      await loadAdminAssignments();
-      await API.refreshNotifications();
+      const id = Number(deleteButton?.dataset.id);
+      if (!deleteButton || deleteButton.disabled || adminDeletes.assignment.has(id)) return;
+      if (!API.normalizeFlag(API.getUser()?.is_admin) || !confirm('정말 이 과제를 삭제하시겠습니까?')) return;
+      return deleteAdminRecord('assignment', id, assignmentId => API.deleteAssignment(assignmentId));
     });
 
-    document.getElementById('adminMessageList').addEventListener('click', async (e) => {
-      if (!e.target.classList.contains('delete-admin-message')) return;
-      if (!confirm('정말 이 메세지를 삭제하시겠습니까?')) return;
-      const res = await API.deleteMessage(parseInt(e.target.dataset.id, 10));
-      if (!res || res.error) {
-        alert(res?.error || '메세지 삭제에 실패했습니다.');
-        return;
-      }
-      await loadAdminMessages();
-      await API.refreshNotifications();
+    document.getElementById('adminMessageList').addEventListener('click', async (event) => {
+      const button = event.target.closest('.delete-admin-message');
+      const id = Number(button?.dataset.id);
+      if (!button || button.disabled || adminDeletes.message.has(id)) return;
+      if (!API.normalizeFlag(API.getUser()?.is_admin) || !confirm('정말 이 메세지를 삭제하시겠습니까?')) return;
+      return deleteAdminRecord('message', id, messageId => API.deleteMessage(messageId));
     });
 
       document.querySelectorAll('.admin-accordion-toggle').forEach(button => {
