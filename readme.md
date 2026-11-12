@@ -1,6 +1,6 @@
 # 과제 알리미
 
-학교 Google 계정으로 과제·공지·제출 현황을 관리하는 Express/MySQL 앱입니다. 2026-11-12에 전체 화면을 다시 디자인하고 GitHub Pages 화면 + 맥북 서버 분리 운영을 구현했습니다.
+학교 Google 계정으로 과제·공지·제출 현황을 관리하는 Express/MySQL 앱입니다. 화면은 GitHub Pages에서, 서버·DB·첨부파일은 Raspberry Pi 4에서 실행하고 고정 Cloudflare Tunnel과 Workers VPC로 연결합니다.
 
 ## 화면
 
@@ -9,12 +9,12 @@
 - 학교 계정 로그인과 학년·반 선택
 - 라이트·다크모드, 키보드 조작, 모바일 한 열 배치
 
-## GitHub Pages + 맥북
+## GitHub Pages + Raspberry Pi 4
 
-[설치·배포 안내](docs/GITHUB_PAGES_MAC.md)를 따라 실제 Google 웹 클라이언트 ID, API HTTPS 주소, 운영자 학교 이메일을 설정합니다. 현재 소스에 운영 비밀키나 데이터는 들어 있지 않습니다.
+[설치·운영 안내](docs/RASPBERRY_PI.md)를 참고하세요. 현재 소스에 운영 비밀키나 데이터는 들어 있지 않습니다. 이전 맥북 구성은 [별도 문서](docs/GITHUB_PAGES_MAC.md)에 보관했습니다.
 
 - Pages 빌드는 `web/src`의 허용된 프런트 파일만 배포합니다.
-- 맥북의 Express/MySQL/첨부파일은 HTTPS 터널 뒤에서 실행합니다.
+- 라즈베리파이의 Express/MySQL/첨부파일은 고정 고정 Cloudflare Tunnel과 Workers VPC HTTPS 주소 뒤에서 실행합니다.
 - 도메인이 없는 `github.io` 구성에는 타사 쿠키에 의존하지 않는 단기 Bearer 인증과 자동 갱신 세션을 사용합니다.
 - 같은 출처의 기존 Express 배포는 기본 쿠키 방식으로 유지됩니다.
 

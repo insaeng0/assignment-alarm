@@ -1,99 +1,81 @@
-# 라즈베리파이 5 8GB에서 운영하기
+# GitHub Pages + 고정 Cloudflare Tunnel + Raspberry Pi 4
 
-소규모 과제알리미의 Express 서버와 MySQL을 함께 실행할 수 있습니다. 동시 이용 가능 인원은 집 인터넷 업로드 속도와 이미지 사용량 등에 따라 달라집니다. Pi의 전원이나 집 인터넷이 끊기면 서비스도 중단됩니다.
+화면은 GitHub Pages에서, 서버·DB·첨부파일은 Ubuntu 24.04 ARM64가 설치된 Raspberry Pi 4에서 실행합니다.
 
-## 1. 준비
+- 화면: https://insaeng0.github.io/assignment-alarm/
+- 고정 API 구성: https://assignment-alarm-api.insaeng0.workers.dev
+- Pi 작업 경로: /home/ubuntu/seongmin/assignment-alarm
+- 내부 API: http://127.0.0.1:3100
 
-Raspberry Pi OS Lite **64-bit**, 안정적인 전원, 냉각 장치, 유선 LAN을 권장합니다. 장기 DB 저장에는 SSD가 유리합니다. [Pi 5 안내](https://www.raspberrypi.com/products/raspberry-pi-5/)
+```text
+브라우저 → GitHub Pages
+           ├─ Google 학교 계정 인증
+           └─ 고정 Worker HTTPS 주소
+                  → 제한한 VPC Service
+                  → Pi의 정식 Cloudflare Tunnel
+                  → 127.0.0.1:3100의 Express → MySQL / 첨부파일
+```
 
-OS를 업데이트한 뒤 [Docker의 Debian 공식 설치 안내](https://docs.docker.com/engine/install/debian/)를 따라 Docker Engine과 Compose 플러그인을 설치합니다. `docker compose version`이 동작하는지 확인합니다. Docker 권한 설정을 하지 않았다면 아래 Docker 명령에 `sudo`를 붙입니다.
-
-공식 `node:24-alpine`과 `mysql:8.4` 이미지는 ARM64를 지원합니다. [Node 이미지](https://hub.docker.com/_/node/tags?name=24-alpine&page=1), [MySQL 이미지](https://hub.docker.com/_/mysql/tags?name=8.&page=1)
-
-## 2. 도메인 없이 무료 HTTPS 주소 만들기
-
-**Tailscale Funnel**의 개인 비상업 Personal 플랜은 무료입니다. 방문 학생은 Tailscale 앱이나 계정이 필요 없고, 고정 IP나 공유기 포트포워딩도 필요하지 않습니다. `https://기기이름.tailnet이름.ts.net` 주소를 사용합니다. [요금](https://tailscale.com/pricing), [Funnel](https://tailscale.com/docs/features/tailscale-funnel)
-
-[공식 Linux 설치 안내](https://tailscale.com/docs/install/linux)에 따라 Tailscale을 Pi에 설치하고:
+## 실행과 재시작
 
 ```sh
-sudo tailscale up
-sudo tailscale funnel --bg 3000
-tailscale funnel status
+cd /home/ubuntu/seongmin/assignment-alarm
+docker compose --env-file .env.pi ps
+curl http://127.0.0.1:3100/api/health
+systemctl is-enabled docker assignment-alarm-tunnel
+systemctl is-active assignment-alarm-tunnel
+sudo journalctl -u assignment-alarm-tunnel --since '10 minutes ago' --no-pager
 ```
 
-처음에는 계정 소유자가 Funnel/HTTPS 사용을 관리 화면에서 허용해야 할 수 있습니다. 명령이 표시하는 안내를 따르고 실제 계정의 요금제를 확인합니다. `--bg`는 재부팅 뒤 자동 복귀합니다. 장기 서버는 기기 키 만료 설정도 확인합니다. [CLI](https://tailscale.com/docs/reference/tailscale-cli/funnel), [기기 키 만료](https://tailscale.com/docs/features/access-control/auth-keys)
-
-Funnel은 현재 beta이고 조정할 수 없는 대역폭 제한이 있습니다. 고부하 학교 전체 서비스의 가동률을 보장하는 호스팅은 아닙니다. [제약](https://tailscale.com/docs/features/tailscale-funnel)
-
-## 3. 소스와 환경 변수
+Docker 컨테이너는 `restart: unless-stopped`로, 정식 터널은 systemd 서비스로 실행합니다. 재연결할 때 같은 터널 ID와 Worker 주소를 사용합니다. 임시 trycloudflare 주소 갱신이나 맥북 실행이 필요하지 않습니다.
 
 ```sh
-git clone https://github.com/kaneaigonan/assignment-alarm.git
-cd assignment-alarm
-cp .env.example .env
-chmod 600 .env
-openssl rand -hex 48
+docker compose --env-file .env.pi up -d
+sudo systemctl restart assignment-alarm-tunnel
 ```
 
-출력한 무작위 값을 `JWT_SECRET`에 넣고 `.env`를 실제 값으로 설정합니다.
-
-```dotenv
-MYSQL_ROOT_PASSWORD=충분히긴무작위비밀번호
-MYSQL_USER=assignment_user
-MYSQL_PASSWORD=루트와다른무작위비밀번호
-MYSQL_DATABASE=assignment_alarm
-JWT_SECRET=openssl로생성한값
-GOOGLE_CLIENT_ID=기존Google웹클라이언트ID
-ADMIN_GOOGLE_EMAILS=실제관리자학교이메일
-NODE_ENV=production
-APP_ORIGIN=https://실제기기.실제tailnet.ts.net
-TRUST_PROXY=1
-ENABLE_ASSIGNMENT_IMAGE_UPLOADS=true
-ASSIGNMENT_IMAGE_MAX_STORAGE_MB=512
-```
-
-앱은 Pi의 `127.0.0.1:3000`으로만 공개되고 MySQL 3306은 공개하지 않습니다. Tailscale이 HTTPS를 처리하며 앱은 프록시 하나를 신뢰합니다. 포트를 인터넷에 직접 공개하면 이 프록시 설정도 다시 검토해야 합니다.
-
-## 4. Google 로그인 주소 등록
-
-Google Cloud Console의 기존 OAuth 웹 클라이언트에서 **승인된 JavaScript 원본**에 정확한 Funnel HTTPS origin을 추가합니다. 예: `https://pi.tailnet.ts.net`. 경로나 끝의 `/`를 넣지 않습니다. 이 앱은 Google Identity Services ID 토큰 방식이라 임의의 OAuth callback 경로를 만들 필요가 없습니다. [Google 설정](https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid)
-
-Funnel HTTPS 주소는 Google origin 형식 조건에 맞는 것으로 판단되지만, 실제 Console 등록·학교 계정 로그인 전에는 연동 완료를 보장할 수 없습니다. Google의 브랜드·도메인 검증 정책은 별도로 적용됩니다. [인증 정책](https://developers.google.com/identity/verification/authentication-policy-compliance)
-
-## 5. 실행
+서버 코드 갱신 후 웹 서비스만 다시 빌드하려면:
 
 ```sh
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=50 web
-curl http://127.0.0.1:3000/api/health
+docker compose --env-file .env.pi up -d --no-deps --build web
 ```
 
-health가 `{"status":"ok"}`인지 확인하고 Funnel 주소에서 학교 로그인·과제 등록·이미지 첨부·제출 체크·관리자 공지·다른 반 접근 차단을 확인합니다. 재부팅 후 DB와 이미지가 남는지도 확인합니다.
+Worker 코드는 `deploy/worker.mjs`, 배포 설정은 `deploy/wrangler.jsonc`입니다. 소유자의 Cloudflare 로그인 후 `wrangler deploy --config deploy/wrangler.jsonc`로 갱신합니다. 기기 전체 서브넷 대신 VPC Service의 loopback 주소와 HTTP 3100 포트에만 연결합니다. Worker는 `/api/` 및 인증된 첨부파일 경로만 전달합니다.
 
-MySQL healthcheck 이후 앱이 시작됩니다. `restart: unless-stopped`로 재시작하고 로그는 서비스별 최대 10MB × 3개로 순환합니다.
+## 비공개 설정과 데이터
 
-## 6. 이전과 백업
+- `.env.pi`: 운영 DB 비밀번호·JWT 서명키 등. 권한 600, Git/ZIP/Pages에서 제외.
+- `.runtime/tunnel-token`: 해당 터널을 실행하는 전용 자격. 권한 600.
+- `.runtime`: 이전 백업과 검증 자료. 권한 700.
+- `mysql/data`: Pi의 영구 MySQL 데이터.
+- `assignment-alarm-pi_assignment-images`: Docker 첨부파일 볼륨.
 
-Railway MySQL volume과 이미지 백업을 먼저 확인합니다. MySQL 8.0에서 옮길 때는 원본을 보존하고 SQL dump/import로 새 8.4 DB에 복원합니다. 기존 `mysql/data`를 바로 8.4에 연결하지 않습니다. [MySQL 업그레이드 준비](https://dev.mysql.com/doc/refman/8.4/en/upgrade-prerequisites.html)
+Pi에는 Cloudflare 계정 전체를 관리하는 OAuth 자격을 복사하지 않습니다. 전용 터널 자격만 사용합니다. MySQL 포트는 외부에 공개하지 않고 Express도 Pi의 loopback에만 바인딩합니다. Cloudflare 경계까지 암호화된 QUIC을 사용하며 같은 Pi 내부 마지막 구간은 HTTP입니다.
 
-DB는 프로젝트의 `mysql/data`, 이미지는 Docker의 `assignment-images` volume입니다. 기존 이미지 파일명을 변경하지 않고 `/app/uploads/assignment-images`에 복원해야 본문 링크가 유지됩니다.
+이전 시 SQL dump와 첨부파일을 함께 복사합니다. 기존 `JWT_SECRET`, `AUTH_REALM_ID`, DB 비밀번호와 첨부파일 이름을 보존합니다. Mac과 Pi에서 별도 DB를 동시에 쓰기 운영하지 않습니다. 원본 실습 프로젝트는 기존 `seongmin` 디렉터리에 그대로 있습니다.
 
-DB와 이미지를 함께 백업하고 Pi 밖의 개인 보관 장소에도 복사합니다. 백업에는 학생 정보가 포함되므로 GitHub에 올리지 않습니다.
+## Google 로그인과 Pages
+
+Google OAuth 승인된 JavaScript 원본은 `https://insaeng0.github.io`를 유지합니다. Google 버튼이 실행되는 화면은 Pages이므로 API 주소만 바꿀 때 새 Google 원본 등록은 필요하지 않습니다.
+
+GitHub 저장소 변수 `ASSIGNMENT_API_BASE_URL`에 고정 Worker origin을 넣고 Pages 워크플로를 실행합니다. `ASSIGNMENT_AUTH_REALM`은 기존 식별자를 유지합니다. 정확한 API 주소와 CSP가 함께 배포됩니다.
+
+## 백업
+
+DB와 첨부파일을 같은 시점에 보관하며, Pi 밖의 비공개 장소에도 복사합니다.
 
 ```sh
-mkdir -p backups
-chmod 700 backups
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysqldump -u "$MYSQL_USER" --single-transaction --no-tablespaces "$MYSQL_DATABASE"' > backups/database.sql
-docker compose exec -T web tar -czf - -C /app/uploads assignment-images > backups/images.tar.gz
-chmod 600 backups/database.sql backups/images.tar.gz
+cd /home/ubuntu/seongmin/assignment-alarm
+umask 077
+mkdir -p .runtime/backups/manual
+docker compose --env-file .env.pi exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --no-tablespaces --set-gtid-purged=OFF "$MYSQL_DATABASE"' > .runtime/backups/manual/database.sql
+docker compose --env-file .env.pi exec -T web tar -czf - -C /app/uploads assignment-images > .runtime/backups/manual/images.tar.gz
 ```
 
-두 백업의 정확한 시점을 맞춰야 한다면 웹 쓰기를 잠시 중단한 뒤 진행합니다. SQL 복원 명령은 아래와 같습니다. 이미 운영 데이터가 있는 DB에는 먼저 별도 백업을 만듭니다.
+최종 이전 때는 원본 웹 쓰기를 중지하고 마지막 DB·이미지를 복사한 뒤 새 서버만 쓰기 운영합니다. `down -v`, `mysql/data` 삭제, 비밀키 재생성은 기존 데이터나 로그인 유지에 영향을 줄 수 있습니다.
 
-```sh
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < backups/database.sql
-```
+## 서비스 특성
 
-관리자 이메일 목록 설정과 재로그인도 확인합니다.
+Workers VPC는 현재 무료 플랜에서도 제공되는 베타 기능입니다. Worker 무료 플랜의 사용 한도와 Pi의 전원·인터넷 상태가 적용됩니다. 서비스 전체의 무중단이나 무제한 사용을 보장하는 구성은 아닙니다.
+
+공식 문서: [Workers VPC](https://developers.cloudflare.com/workers-vpc/get-started/), [터널과 QUIC 조건](https://developers.cloudflare.com/workers-vpc/configuration/tunnel/), [VPC Service 범위](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/).

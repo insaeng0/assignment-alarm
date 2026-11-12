@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "assignment-alarm-api",
+  "account_id": "b955258b6208f14585b20f577dd5c671",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-12",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "vpc_services": [
+    {
+      "binding": "ASSIGNMENT_API",
+      "service_id": "01a1cfe7-ffe2-7cb2-8b77-d32803080257"
+    }
+  ]
+}
