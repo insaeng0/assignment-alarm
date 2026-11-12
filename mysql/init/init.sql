@@ -50,3 +50,37 @@ CREATE TABLE IF NOT EXISTS user_assignments (
   FOREIGN KEY (assignment_id) REFERENCES assignments(assignment_id) ON DELETE CASCADE,
   KEY user_assignments_assignment_user_idx (assignment_id, user_id, is_completed)
 );
+
+-- Durable login refresh state (hashed credentials only).
+CREATE TABLE IF NOT EXISTS auth_refresh_lock (
+    lock_id TINYINT NOT NULL PRIMARY KEY
+  );
+INSERT IGNORE INTO auth_refresh_lock (lock_id) VALUES (1);
+CREATE TABLE IF NOT EXISTS auth_refresh_issuance (
+    user_id INT NOT NULL PRIMARY KEY, window_ms BIGINT UNSIGNED NOT NULL, issue_count INT UNSIGNED NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+  );
+CREATE TABLE IF NOT EXISTS auth_refresh_families (
+    family_id CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+    user_id INT NOT NULL,
+    auth_realm_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    current_token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at_ms BIGINT UNSIGNED NOT NULL,
+    expires_at_ms BIGINT UNSIGNED NOT NULL,
+    revoked TINYINT(1) NOT NULL DEFAULT 0,
+    rate_window_ms BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    rate_count INT UNSIGNED NOT NULL DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    KEY refresh_realm_active_idx (auth_realm_id, revoked, expires_at_ms),
+    KEY refresh_user_created_idx (user_id, created_at_ms)
+  );
+CREATE TABLE IF NOT EXISTS auth_refresh_history (
+    family_id CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    request_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    rotated_at_ms BIGINT UNSIGNED NOT NULL,
+    next_token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    next_expires_at_ms BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (family_id, token_hash),
+    FOREIGN KEY (family_id) REFERENCES auth_refresh_families(family_id) ON DELETE CASCADE
+  );

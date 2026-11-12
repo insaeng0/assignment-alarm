@@ -10,7 +10,7 @@ function createAPI(options = {}) {
   const window = { location: { origin: options.origin || 'https://school.example', pathname: options.pathname || '/calendar.html', href: '', replace(value) { this.href = value; this.replaced = value; } }, ASSIGNMENT_CONFIG: options.config || {}, dispatchEvent() {} };
   if (options.embedded) { window.top = {}; window.self = {}; }
   if (options.windowEvents) window.addEventListener = (name, handler) => options.windowEvents.set(name, handler);
-  const context = vm.createContext({ window, document, URL: options.URL || URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
+  const context = vm.createContext({ window, document, URL: options.URL || URL, URLSearchParams, AbortController, AbortSignal, setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto, indexedDB: options.indexedDB, navigator: options.navigator,
     CustomEvent: class {}, alert() {}, fetch: options.fetch,
     ...(options.MutationObserver ? { MutationObserver: options.MutationObserver } : {}),
     sessionStorage: options.sessionStorage || { getItem:k=>session.get(k)||null, setItem:(k,v)=>session.set(k,v), removeItem:k=>session.delete(k) },
@@ -537,4 +537,90 @@ test('administrator UI resets approval on a class change and saves only after id
   admin = false;
   await ui.listeners.get('adminUserList:click')({ target: button });
   assert.equal(updates.length, 1, 'non-admin state must not issue an admin approval request');
+});
+
+function rememberedStorage() {
+  const records = new Map();
+  const db = { objectStoreNames: { contains: () => true }, close() {}, transaction() {
+    const tx = { objectStore() { return {
+      get(key) { const req = {}; queueMicrotask(() => { req.result = records.has(key) ? structuredClone(records.get(key)) : undefined; req.onsuccess?.(); queueMicrotask(() => tx.oncomplete?.()); }); return req; },
+      put(record) { records.set(record.authRealm, structuredClone(record)); }, delete(key) { records.delete(key); }
+    }; }, abort() { queueMicrotask(() => tx.onabort?.()); } };
+    return tx;
+  } };
+  return { records, open() { const req = { result: db }; queueMicrotask(() => req.onsuccess?.()); return req; } };
+}
+const persistentRealm = 'a'.repeat(64);
+const persistentConfig = { ...bearerConfig, authRealm: persistentRealm };
+const refreshValue = char => 'b'.repeat(64) + '.' + char.repeat(64);
+function persistentFixture() {
+  const indexedDB = rememberedStorage(), storageMap = new Map(), requests = [];
+  let current = refreshValue('c'), serial = 0, failNext = false;
+  const retries = new Map();
+  const refreshExpiry = () => new Date(Date.now() + 90 * 86400_000).toISOString();
+  const session = () => ({ accessToken: token, expiresAt: expiresAt(), refreshToken: current, refreshExpiresAt: refreshExpiry(), authRealm: persistentRealm, user: { id: 2, grade: 1, class_number: 1, is_class_approved: true } });
+  const fetcher = async (url, options = {}) => {
+    requests.push({ url, options }); const route = new URL(url).pathname;
+    if (route === '/api/public-config') return response({ authMode: 'bearer', authRealm: persistentRealm, googleClientId: 'test-client' });
+    if (route === '/api/auth/google') { assert.equal(JSON.parse(options.body).rememberMe, true); return response(session()); }
+    if (route === '/api/auth/refresh') {
+      const body = JSON.parse(options.body), key = body.refreshToken + ':' + body.requestId;
+      if (retries.has(key)) return response(retries.get(key));
+      assert.equal(body.refreshToken, current); assert.match(body.requestId, /^[a-f0-9]{32}$/);
+      current = refreshValue((++serial + 3).toString(16)); const result = session(); retries.set(key, result);
+      if (failNext) { failNext = false; throw new TypeError('response lost after commit'); }
+      return response(result);
+    }
+    if (route === '/api/auth/logout') return response({ success: true });
+    return response({ user_id: 2, grade: 1, class_number: 1, is_class_approved: true });
+  };
+  let lockTail = Promise.resolve();
+  const navigator = { locks: { request(_key, operation) { const next = lockTail.then(operation); lockTail = next.catch(() => {}); return next; } } };
+  const open = extra => createAPI({ config: persistentConfig, storageMap, indexedDB, navigator, fetch: fetcher, ...extra });
+  return { indexedDB, storageMap, requests, open, fetcher, loseNextResponse() { failNext = true; } };
+}
+test('remembered login survives a new browser context and relay origin changes while access stays tab scoped', async () => {
+  const f = persistentFixture();
+  await f.open().api.googleAuth('google-credential');
+  assert.equal(f.indexedDB.records.size, 1);
+  assert.ok(![...f.storageMap.values()].some(value => value.includes(refreshValue('c'))));
+  const next = f.open({ config: { ...persistentConfig, apiBaseUrl: 'https://new-relay.example' } });
+  assert.equal(next.api.getToken(), null);
+  assert.equal((await next.api.me()).user_id, 2);
+  const refresh = f.requests.find(item => item.url.endsWith('/auth/refresh'));
+  assert.equal(new URL(refresh.url).origin, 'https://new-relay.example');
+  assert.equal(refresh.options.credentials, 'omit'); assert.equal(refresh.options.redirect, 'error');
+  assert.equal(refresh.options.headers.Authorization, undefined);
+  assert.equal(next.api.getToken(), token);
+});
+test('a lost refresh response keeps the persisted request ID and retries without deleting remembered login', async () => {
+  const f = persistentFixture(); await f.open().api.googleAuth('credential');
+  const next = f.open(); f.loseNextResponse();
+  assert.equal((await next.api.me()).success, false);
+  const record = structuredClone(f.indexedDB.records.get(persistentRealm));
+  assert.ok(record.pendingRequestId);
+  assert.equal((await next.api.me()).user_id, 2);
+  const sent = f.requests.filter(item => item.url.endsWith('/auth/refresh')).map(item => JSON.parse(item.options.body));
+  assert.equal(sent.length, 2); assert.deepEqual(sent[0], sent[1]);
+  assert.equal(f.indexedDB.records.get(persistentRealm).pendingRequestId, null);
+});
+test('a mismatched server realm never receives a remembered credential', async () => {
+  const f = persistentFixture(); await f.open().api.googleAuth('credential');
+  const next = f.open({ fetch: async url => { assert.ok(url.endsWith('/public-config')); return response({ authMode: 'bearer', googleClientId: 'client', authRealm: 'd'.repeat(64) }); } });
+  const result = await next.api.me(); assert.equal(result.success, false);
+  assert.equal(f.indexedDB.records.size, 1); assert.equal(next.window.location.href, '');
+});
+test('concurrent requests share renewal and logout prevents a late refresh from restoring credentials', async () => {
+  const f = persistentFixture(); await f.open().api.googleAuth('credential');
+  const next = f.open(); await Promise.all([next.api.me(), next.api.me()]);
+  assert.equal(f.requests.filter(item => item.url.endsWith('/auth/refresh')).length, 1);
+  let release, started;
+  const begin = new Promise(resolve => { started = resolve; });
+  const late = f.open({ fetch: async (url, options) => {
+    if (url.endsWith('/auth/refresh')) { started(); await new Promise(resolve => { release = resolve; }); }
+    return f.fetcher(url, options);
+  } });
+  const renewal = late.api.refreshRememberedSession(); await begin;
+  await late.api.logout(); release(); await renewal;
+  assert.equal(late.api.getToken(), null); assert.equal(f.indexedDB.records.size, 0);
 });

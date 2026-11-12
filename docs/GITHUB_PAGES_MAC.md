@@ -1,6 +1,6 @@
 # GitHub Pages 화면 + 맥북 서버
 
-이 소스는 GitHub 기본 주소의 화면과 별도 HTTPS 주소의 맥북 Express/MySQL 서버를 연결합니다. 현재 계정·운영 DB·Google 설정이 자동으로 연결된 배포본은 아닙니다.
+이 소스는 GitHub 기본 주소의 화면과 별도 HTTPS 주소의 맥북 Express/MySQL 서버를 연결합니다. 새 설치에서는 아래 설정을 실제 계정·운영 DB·Google 설정과 연결해야 합니다.
 
 ## 구성
 
@@ -11,7 +11,7 @@
  └─ HTTPS API 주소 → HTTPS 터널 → 맥북 127.0.0.1:3100 → Express + MySQL
 ```
 
-Pages에는 HTML/CSS/JS만 올립니다. `.env*`, 서버 코드, DB, 업로드 파일은 공개 배포 산출물에서 제외합니다. API 접근 토큰은 1시간 동안 유효하고 브라우저 탭의 `sessionStorage`에만 저장합니다. 타사 쿠키에 의존하지 않습니다. 로그아웃·만료·서버 재시작 후에는 다시 로그인해야 합니다.
+Pages에는 HTML/CSS/JS만 올립니다. `.env*`, 서버 코드, DB, 업로드 파일은 공개 배포 산출물에서 제외합니다. API 접근 토큰은 짧게 유지하고 탭의 `sessionStorage`에 저장합니다. 로그인 갱신 자격은 브라우저의 `IndexedDB`에 저장하고, 서버 DB에는 해시만 보관합니다. 갱신할 때마다 자격을 교체하고 사용 중에는 자동 갱신하므로 새 탭·브라우저 재실행·서버 재시작 후에도 로그인이 이어집니다. 타사 쿠키에 의존하지 않습니다. 직접 로그아웃하거나 브라우저 사이트 데이터를 지우면 해제되며, 90일 동안 사용하지 않은 갱신 세션은 만료됩니다.
 
 ## 1. Google 웹 클라이언트 확인
 
@@ -56,7 +56,7 @@ node scripts/configure-mac.mjs --api-origin https://실제-API-호스트 --googl
 docker compose --env-file .env.mac up -d --build
 ```
 
-생성되는 `.env.mac`은 권한 `600`이며 Git에서 제외됩니다. DB 비밀번호와 JWT 서명키는 무작위로 만들고 출력하지 않습니다. 재실행 시 기존 비밀번호를 유지합니다. 기존 DB를 가져오는 경우 해당 DB의 자격 증명을 먼저 유지해야 하며, 운영 데이터나 백업을 자동 삭제·초기화하지 않습니다.
+생성되는 `.env.mac`은 권한 `600`이며 Git에서 제외됩니다. DB 비밀번호와 JWT 서명키는 무작위로 만들고 출력하지 않습니다. 재실행 시 기존 비밀번호와 고정 공개 인증 네임스페이스 `AUTH_REALM_ID`를 유지합니다. 기존 DB를 가져오는 경우 해당 DB의 자격 증명을 먼저 유지해야 하며, 운영 데이터나 백업을 자동 삭제·초기화하지 않습니다.
 
 `--admin-email`에는 반 소속을 승인할 운영자의 실제 학교 이메일을 지정합니다. 이 값이 없거나 학교 이메일 형식이 아니면 설정 생성을 중단합니다. 추가 운영자는 `.env.mac`의 `ADMIN_GOOGLE_EMAILS`에 쉼표로 구분해 지정한 뒤 서버를 재시작하세요. `--teacher-admins true`는 Google로 검증된 `teacher숫자@bssm.hs.kr` 계정에도 관리자 권한을 허용합니다. 다른 문자열 포함·다른 도메인에는 적용하지 않으며 명시적 제외 목록이 우선합니다. 학생의 학년·반은 관리자 확인을 거쳐 승인합니다. Google 로그인만으로 실제 반 소속이 증명되는 것은 아닙니다. 기존 학생 계정도 확인 전에는 승인 대기 상태가 됩니다.
 
@@ -68,6 +68,7 @@ TRUST_PROXY=1
 APP_ORIGIN=https://실제-API-호스트
 FRONTEND_ORIGIN=https://kaneaigonan.github.io
 PAGES_AUTH_MODE=bearer
+AUTH_REALM_ID=설정스크립트가생성한64자리hex
 HOST_PORT=3100
 ALLOW_TEACHER_NUMBER_ADMINS=true
 COOKIE_SAMESITE=lax
@@ -80,11 +81,19 @@ COOKIE_SAMESITE=lax
 저장소 `kaneaigonan/assignment-alarm`에서:
 
 1. Settings → Pages → Source를 **GitHub Actions**로 선택합니다.
-2. Settings → Secrets and variables → Actions → Variables에 `ASSIGNMENT_API_BASE_URL`을 만들고 실제 HTTPS API Origin을 넣습니다. 이 주소는 공개 설정이며 비밀키가 아닙니다.
+2. Settings → Secrets and variables → Actions → Variables에 `ASSIGNMENT_API_BASE_URL`을 만들고 실제 HTTPS API Origin을 넣습니다. 이 주소는 공개 설정이며 비밀키가 아닙니다. 같은 위치에 `ASSIGNMENT_AUTH_REALM`을 만들고 `.env.mac`의 `AUTH_REALM_ID`를 넣습니다. 이 값도 공개 식별자이며 터널 주소가 바뀌어도 유지해야 합니다.
 3. `.github/workflows/pages.yml`이 있는 변경을 기본 브랜치에 반영합니다.
 4. Actions에서 `Publish frontend to GitHub Pages` 실행 결과를 확인합니다. 수동 실행의 `api_base_url`로 API 주소를 지정할 수도 있습니다.
 
 워크플로는 테스트 후 허용 목록의 프런트 파일만 `_site`에 복사하고 공개 API 설정·CSP를 생성합니다. 배포 URL이 반환되고 실제 Google 로그인·관리자 승인·과제 저장·제출 체크·권한별 첨부파일 조회까지 성공해야 운영 연결이 완료된 것입니다.
+
+## 로그인 유지와 서버 갱신
+
+- 새로 로그인하면 자동 로그인 유지가 기본으로 적용됩니다. 기존 탭 세션은 한 번 다시 Google 로그인하면 갱신 세션을 발급받습니다.
+- 페이지에 배포된 고정 `authRealm`과 서버의 공개 설정이 일치해야 갱신 자격을 전송합니다. 터널 주소만 바뀌면 짧은 접근 토큰을 다시 발급받습니다. 배포 설정의 API 주소와 저장소 편집 권한이 신뢰의 기준입니다.
+- 갱신 자격은 사용할 때 교체하며, 이미 사용한 자격의 재사용이 확인되면 해당 로그인 묶음을 폐기합니다. 동시에 열린 탭은 잠금으로 갱신을 조정합니다.
+- 연결 오류나 서버의 일시적 장애에는 저장된 로그인 정보를 지우지 않습니다. 서버가 복구되면 다시 시도할 수 있습니다.
+- 갱신용 DB 테이블만 추가하며 기존 과제·회원·첨부파일은 유지합니다. 변경 적용 전 비공개 DB·첨부파일 백업을 보관하세요.
 
 ## 실제 운영 시 확인할 점
 

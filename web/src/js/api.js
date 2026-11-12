@@ -16,6 +16,178 @@ const API = {
   bearerSession: null,
   protectedImageStates: new Map(),
   protectedImageObserver: null,
+  rememberDbPromise: null,
+  refreshPromise: null,
+  trustedRefreshKey: null,
+  logoutGeneration: 0,
+  getAuthRealm() {
+    const realm = String(window.ASSIGNMENT_CONFIG?.authRealm || '').trim();
+    if (!realm) return null;
+    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(realm)) throw Object.assign(new Error('로그인 서버 식별자 설정을 확인해주세요.'), { code: 'API_CONFIG' });
+    return realm;
+  },
+  randomRequestId() {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+  },
+  openRememberDb() {
+    if (this.rememberDbPromise) return this.rememberDbPromise;
+    this.rememberDbPromise = new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') { reject(new Error('브라우저 저장소를 사용할 수 없습니다.')); return; }
+      const request = indexedDB.open('assignment-alarm-auth', 1);
+      request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains('sessions')) request.result.createObjectStore('sessions', { keyPath: 'authRealm' }); };
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => { db.close(); this.rememberDbPromise = null; };
+        resolve(db);
+      };
+      request.onerror = request.onblocked = () => reject(new Error('로그인 유지 저장소를 열지 못했습니다.'));
+    }).catch(error => { this.rememberDbPromise = null; throw error; });
+    return this.rememberDbPromise;
+  },
+  async rememberTransaction(action, mutate) {
+    const realm = this.getAuthRealm();
+    if (!realm) return null;
+    const db = await this.openRememberDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('sessions', mutate ? 'readwrite' : 'readonly');
+      const store = tx.objectStore('sessions');
+      const get = store.get(realm);
+      let result = null;
+      get.onsuccess = () => {
+        try { result = action(get.result || null, store, realm); } catch { tx.abort(); }
+      };
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = tx.onabort = () => reject(new Error('로그인 유지 정보를 저장하지 못했습니다.'));
+    });
+  },
+  validRememberedSession(record) {
+    if (!record || record.authRealm !== this.getAuthRealm() || typeof record.refreshToken !== 'string'
+      || !/^[A-Za-z0-9._~-]{32,2048}$/.test(record.refreshToken) || typeof record.refreshExpiresAt !== 'string') return false;
+    const expiry = Date.parse(record.refreshExpiresAt);
+    return Number.isFinite(expiry) && new Date(expiry).toISOString() === record.refreshExpiresAt && expiry > Date.now()
+      && String(record.logoutMarker || '') === String(this.storageGet('assignment-logout:' + this.getAuthRealm()) || '')
+      && (!record.pendingRequestId || /^[a-f0-9]{32,128}$/i.test(record.pendingRequestId));
+  },
+  async readRememberedSession() {
+    if (!this.getAuthRealm() || this.getAuthMode() !== 'bearer') return null;
+    const record = await this.rememberTransaction(current => current, false);
+    if (!record) return null;
+    if (!this.validRememberedSession(record)) { await this.deleteRememberedSession(record.refreshToken); return null; }
+    return record;
+  },
+  async deleteRememberedSession(expectedToken = null) {
+    return this.rememberTransaction((current, store, realm) => {
+      if (!current || (expectedToken && current.refreshToken !== expectedToken)) return false;
+      store.delete(realm);
+      return true;
+    }, true);
+  },
+  async saveRememberedSession(record, expected = null) {
+    if (!this.validRememberedSession(record)) throw new Error('로그인 유지 응답이 올바르지 않습니다.');
+    return this.rememberTransaction((current, store) => {
+      if (!this.validRememberedSession(record)) return false;
+      if (expected && (!current || current.refreshToken !== expected.refreshToken || current.pendingRequestId !== expected.pendingRequestId)) return false;
+      store.put(record);
+      return true;
+    }, true);
+  },
+  async prepareRememberedRefresh() {
+    return this.rememberTransaction((current, store) => {
+      if (!this.validRememberedSession(current)) return null;
+      if (!current.pendingRequestId) { current = { ...current, pendingRequestId: this.randomRequestId() }; store.put(current); }
+      return current;
+    }, true);
+  },
+  async trustRememberedBackend() {
+    const realm = this.getAuthRealm();
+    const key = this.getApiOrigin() + '|' + realm;
+    if (this.trustedRefreshKey === key) return;
+    const config = await this.publicConfig({ force: true });
+    if (config?.error) throw Object.assign(new Error(config.error), { code: config.code || 'BACKEND_UNAVAILABLE', status: config.status });
+    if (config?.authMode !== 'bearer' || config.authRealm !== realm) throw Object.assign(new Error('로그인 서버의 식별자가 일치하지 않습니다.'), { code: 'AUTH_REALM_MISMATCH' });
+    this.trustedRefreshKey = key;
+  },
+  async installLoginSession(data, { expected = null, generation = this.logoutGeneration, logoutMarker = null } = {}) {
+    const access = { accessToken: data.accessToken, expiresAt: data.expiresAt, apiOrigin: this.getApiOrigin() };
+    if (!this.validAccessSession(access)) throw new Error('API 서버의 로그인 응답을 확인해주세요.');
+    const realm = this.getAuthRealm();
+    if (realm && data.refreshToken) {
+      if (data.authRealm !== realm) throw Object.assign(new Error('로그인 서버의 식별자가 일치하지 않습니다.'), { code: 'AUTH_REALM_MISMATCH' });
+      const record = { authRealm: realm, refreshToken: data.refreshToken, refreshExpiresAt: data.refreshExpiresAt, pendingRequestId: null,
+        logoutMarker: expected ? expected.logoutMarker || '' : logoutMarker === null ? this.storageGet('assignment-logout:' + realm) || '' : logoutMarker };
+      if (generation !== this.logoutGeneration) return false;
+      const saved = await this.saveRememberedSession(record, expected);
+      if (!saved) return false;
+    }
+    if (generation !== this.logoutGeneration || (realm && data.refreshToken && !this.validRememberedSession({ authRealm: realm, refreshToken: data.refreshToken, refreshExpiresAt: data.refreshExpiresAt, logoutMarker: expected ? expected.logoutMarker || '' : logoutMarker === null ? this.storageGet('assignment-logout:' + realm) || '' : logoutMarker }))) return false;
+    this.setToken(data.accessToken, data.expiresAt);
+    if (data.user) this.setUser(data.user);
+    return true;
+  },
+  async refreshRememberedSession() {
+    if (this.getAuthMode() !== 'bearer' || !this.getAuthRealm()) return { available: false };
+    if (this.refreshPromise) return this.refreshPromise;
+    const operation = async () => {
+      const generation = this.logoutGeneration;
+      let initial;
+      try { initial = await this.readRememberedSession(); } catch { return { available: false }; }
+      if (!initial) return { available: false };
+      try {
+        await this.trustRememberedBackend();
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (generation !== this.logoutGeneration) return { available: false };
+          const record = await this.prepareRememberedRefresh();
+          if (!record) return { available: false };
+          const response = await fetch(this.apiUrl('/api/auth/refresh').toString(), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'omit', redirect: 'error',
+            signal: AbortSignal.timeout(30_000), body: JSON.stringify({ refreshToken: record.refreshToken, requestId: record.pendingRequestId })
+          });
+          let data;
+          try { data = await response.json(); } catch { throw new Error('로그인 유지 서버의 응답을 읽지 못했습니다.'); }
+          if (response.status === 409 && data?.code === 'REFRESH_RACE') {
+            const latest = await this.readRememberedSession();
+            if (attempt === 0 && latest && latest.refreshToken !== record.refreshToken) continue;
+            return { available: true, transient: true, error: '다른 탭에서 로그인 상태를 갱신하고 있습니다. 다시 시도해주세요.', code: 'REFRESH_RACE' };
+          }
+          if (response.status === 401) {
+            const removed = await this.deleteRememberedSession(record.refreshToken);
+            if (!removed && attempt === 0 && await this.readRememberedSession()) continue;
+            this.clearToken(); this.clearUser();
+            return { available: true, definitive: true, status: 401, error: '로그인이 만료되었습니다.' };
+          }
+          if (!response.ok) return { available: true, transient: true, status: response.status, error: data?.error || '로그인 유지 서버에 연결하지 못했습니다.' };
+          const installed = await this.installLoginSession(data, { expected: record, generation });
+          if (!installed) {
+            const latest = await this.readRememberedSession();
+            if (generation === this.logoutGeneration && latest && attempt === 0) continue;
+            return { available: false };
+          }
+          return { available: true, refreshed: true };
+        }
+      } catch (error) {
+        return { available: true, transient: true, code: error?.code || 'NETWORK_ERROR', error: error?.message || '로그인 상태를 갱신하지 못했습니다.' };
+      }
+      return { available: true, transient: true, error: '로그인 상태를 다시 확인해주세요.' };
+    };
+    const run = () => typeof navigator !== 'undefined' && navigator.locks?.request
+      ? navigator.locks.request('assignment-auth:' + this.getAuthRealm(), operation) : operation();
+    this.refreshPromise = Promise.resolve().then(run).finally(() => { this.refreshPromise = null; });
+    return this.refreshPromise;
+  },
+  broadcastLogout() {
+    const realm = this.getAuthRealm();
+    if (realm) this.storageSet('assignment-logout:' + realm, Date.now() + ':' + this.randomRequestId());
+  },
+  initRememberedLogout() {
+    if (typeof window.addEventListener !== 'function') return;
+    window.addEventListener('storage', event => {
+      if (!this.getAuthRealm() || event.key !== 'assignment-logout:' + this.getAuthRealm()) return;
+      this.logoutGeneration++; this.clearToken(); this.clearUser();
+      if (!this.isLoginPage()) window.location.href = this.appPageUrl('login.html');
+    });
+  },
   isEmbedded() {
     try { return Boolean(window.top && window.self && window.top !== window.self); } catch { return true; }
   },
@@ -99,12 +271,16 @@ const API = {
     try {
       const origin = this.getApiOrigin();
       const previous = this.storageGet('assignment-api-origin');
+      const realm = this.getAuthRealm();
+      const previousRealm = this.storageGet('assignment-auth-realm');
       if ((previous && previous !== origin) || (!previous && origin !== window.location.origin)) {
-        this.clearUser();
+        if (!realm || previousRealm !== realm) this.clearUser();
         this.storageRemove(this.publicConfigCacheKey);
         if (previous) { try { sessionStorage.removeItem('assignment-access:' + previous); } catch {} }
       }
+      if (previousRealm && previousRealm !== realm) this.clearUser();
       this.storageSet('assignment-api-origin', origin);
+      if (realm) this.storageSet('assignment-auth-realm', realm);
       this.storageRemove('token');
     } catch { /* request() presents a readable error for invalid configuration. */ }
   },
@@ -142,7 +318,7 @@ const API = {
     }
     if (!this.validAccessSession(session)) {
       this.clearToken();
-      this.clearUser();
+      if (!this.getAuthRealm()) this.clearUser();
       return null;
     }
     this.bearerSession = session;
@@ -319,7 +495,7 @@ const API = {
     }
   },
 
-  async requestImage(value, { signal } = {}) {
+  async requestImage(value, { signal, retried = false } = {}) {
     if (this.isEmbedded()) throw new Error('이 화면은 새 탭에서 직접 열어주세요.');
     if (!this.isProtectedImageUrl(value)) throw new Error('허용되지 않은 이미지 주소입니다.');
     const url = this.resolveContentUrl(value);
@@ -332,7 +508,12 @@ const API = {
       const bearer = this.getAuthMode() === 'bearer';
       const headers = {};
       if (bearer) {
-        const token = this.getToken();
+        let token = this.getToken();
+        if (!token && !retried) {
+          const renewal = await this.refreshRememberedSession();
+          if (renewal.transient) throw new Error(renewal.error);
+          token = this.getToken();
+        }
         if (!token) throw new Error('이미지를 보려면 다시 로그인해주세요.');
         headers.Authorization = 'Bearer ' + token;
       }
@@ -340,6 +521,12 @@ const API = {
         method: 'GET', headers, credentials: bearer ? 'omit' : url.origin === window.location.origin ? 'same-origin' : 'include',
         redirect: 'error', signal: controller.signal
       });
+      if (response.status === 401 && bearer && !retried) {
+        this.clearToken();
+        const renewal = await this.refreshRememberedSession();
+        if (renewal.refreshed) return this.requestImage(value, { signal, retried: true });
+        if (renewal.transient) throw new Error(renewal.error);
+      }
       if (response.status === 401) { this.clearToken(); this.clearUser(); }
       if (response.status === 403) {
         let problem;
@@ -466,16 +653,24 @@ const API = {
     }
   },
 
-  async request(method, url, body) {
+  async request(method, url, body, { retried = false } = {}) {
     if (this.isEmbedded()) return { success: false, error: '이 화면은 새 탭에서 직접 열어주세요.' };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
     try {
       const target = this.apiUrl(url);
       const bearer = this.getAuthMode() === 'bearer';
+      const publicEndpoint = target.pathname === '/api/public-config';
+      const authControl = target.pathname.startsWith('/api/auth/') && target.pathname !== '/api/auth/me';
+      if (bearer && !publicEndpoint && !authControl && !retried && !this.getToken()) {
+        const renewal = await this.refreshRememberedSession();
+        if (renewal.transient) return { success: false, code: renewal.code || 'NETWORK_ERROR', status: renewal.status, error: renewal.error };
+      }
       const headers = { 'Content-Type': 'application/json' };
-      const token = bearer ? this.getToken() : null;
+      const token = bearer && !publicEndpoint ? this.getToken() : null;
       if (token) headers.Authorization = 'Bearer ' + token;
+      const sessionGeneration = this.logoutGeneration;
+      const loginLogoutMarker = this.getAuthRealm() ? this.storageGet('assignment-logout:' + this.getAuthRealm()) || '' : '';
       const res = await fetch(target.toString(), {
         method,
         headers,
@@ -485,6 +680,12 @@ const API = {
         body: body === undefined ? undefined : JSON.stringify(body)
       });
       const isAuthRequest = ['/api/auth/login', '/api/auth/register', '/api/auth/google', '/api/auth/google/register'].includes(target.pathname);
+      if (res.status === 401 && bearer && !authControl && !publicEndpoint && !retried) {
+        this.clearToken();
+        const renewal = await this.refreshRememberedSession();
+        if (renewal.refreshed) return this.request(method, url, body, { retried: true });
+        if (renewal.transient) return { success: false, code: renewal.code || 'NETWORK_ERROR', status: renewal.status, error: renewal.error };
+      }
       if (res.status === 401 && (bearer || !isAuthRequest)) { this.clearToken(); this.clearUser(); }
       if (res.status === 401 && !isAuthRequest) {
         if (!this.isLoginPage()) window.location.href = this.appPageUrl('login.html');
@@ -498,8 +699,10 @@ const API = {
         if (res.status === 403 && data?.code === 'CLASS_APPROVAL_REQUIRED') this.handleClassApprovalRequired();
         return { success: false, status: res.status, code: data?.code, error: data?.error || '요청을 처리하지 못했습니다. 다시 시도해주세요.' };
       }
-      if (bearer && isAuthRequest && data?.user && !this.setToken(data.accessToken, data.expiresAt)) {
-        return { success: false, error: 'API 서버의 Bearer 로그인 설정을 확인해주세요.' };
+      if (bearer && isAuthRequest && data?.user) {
+        try {
+          if (!await this.installLoginSession(data, { generation: sessionGeneration, logoutMarker: loginLogoutMarker })) return { success: false, error: '로그인 처리가 취소되었습니다.' };
+        } catch (error) { return { success: false, code: error.code || 'PERSISTENCE_ERROR', error: error.message || '로그인 유지 정보를 저장하지 못했습니다.' }; }
       }
       return data;
     } catch (error) {
@@ -519,10 +722,10 @@ const API = {
 
   login(name, password) { return this.post('/api/auth/login', { name, password }); },
   register(data) { return this.post('/api/auth/register', data); },
-  googleAuth(credential) { return this.post('/api/auth/google', { credential }); },
-  googleRegister(data) { return this.post('/api/auth/google/register', data); },
+  googleAuth(credential) { return this.post('/api/auth/google', { credential, rememberMe: true }); },
+  googleRegister(data) { return this.post('/api/auth/google/register', { ...data, rememberMe: true }); },
   me() { return this.get('/api/auth/me'); },
-  logoutRequest() { return this.post('/api/auth/logout'); },
+  logoutRequest(data) { return this.post('/api/auth/logout', data); },
 
   getCachedPublicConfig() {
     const discard = () => { this.storageRemove(this.publicConfigCacheKey); return null; };
@@ -542,7 +745,8 @@ const API = {
     try {
       return Boolean(value && typeof value === 'object' && value.success !== false && !value.error
         && typeof value.googleClientId === 'string' && value.googleClientId.trim()
-        && value.authMode === this.getAuthMode());
+        && value.authMode === this.getAuthMode()
+        && (!this.getAuthRealm() || value.authRealm === this.getAuthRealm()));
     } catch { return false; }
   },
 
@@ -575,6 +779,9 @@ const API = {
         let normalized = config && typeof config === 'object' ? config : {};
         if (normalized.authMode && normalized.authMode !== this.getAuthMode()) {
           normalized = { ...normalized, googleClientId: null, code: 'AUTH_MODE_MISMATCH', error: '프런트엔드와 API 서버의 로그인 방식 설정이 다릅니다.' };
+        }
+        if (!normalized.error && this.getAuthRealm() && normalized.authRealm !== this.getAuthRealm()) {
+          normalized = { ...normalized, googleClientId: null, code: 'AUTH_REALM_MISMATCH', error: '로그인 서버의 식별자가 일치하지 않습니다.' };
         }
         this.setCachedPublicConfig(normalized);
         return normalized;
@@ -926,11 +1133,18 @@ const API = {
   async refreshNotifications() {},
   async logout() {
     const bearer = this.getAuthMode() === 'bearer';
-    const result = await this.logoutRequest();
+    let remembered = null;
+    if (bearer) {
+      this.logoutGeneration++;
+      try { remembered = await this.readRememberedSession(); } catch {}
+      this.broadcastLogout();
+    }
+    const result = await this.logoutRequest(remembered ? { refreshToken: remembered.refreshToken } : undefined);
     if (!result?.success && !bearer) {
       alert(result?.error || '로그아웃하지 못했습니다. 다시 시도해주세요.');
       return;
     }
+    if (remembered) { try { await this.deleteRememberedSession(remembered.refreshToken); } catch {} }
     this.clearToken();
     this.clearUser();
     window.location.href = this.appPageUrl('login.html');
@@ -955,6 +1169,7 @@ const API = {
 };
 API.initBackendScope();
 API.initTheme();
+API.initRememberedLogout();
 API.initEmbeddingGuard();
 API.initProtectedImages();
 window.API = API;

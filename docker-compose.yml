@@ -47,6 +47,7 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-}
       PAGES_AUTH_MODE: ${PAGES_AUTH_MODE:-cookie}
+      AUTH_REALM_ID: ${AUTH_REALM_ID:-}
       PAGES_ACCESS_MAX_SESSIONS: ${PAGES_ACCESS_MAX_SESSIONS:-5000}
       COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
       ASSIGNMENT_IMAGE_DIR: /app/uploads/assignment-images

@@ -44,6 +44,7 @@ jobs:
       - name: Build public frontend only
         env:
           ASSIGNMENT_API_BASE_URL: ${{ inputs.api_base_url || vars.ASSIGNMENT_API_BASE_URL }}
+          ASSIGNMENT_AUTH_REALM: ${{ vars.ASSIGNMENT_AUTH_REALM }}
         run: node scripts/build-pages.mjs
       - name: Upload frontend artifact
         uses: actions/upload-pages-artifact@v4

@@ -7,7 +7,8 @@ import { acceptedTunnelOrigin, providerOrigin, validatePrivateEnv, replaceAppOri
 
 const origin = 'https://abcd1234.lhr.life';
 const client = '12345-test.apps.googleusercontent.com';
-const env = `# private\nNODE_ENV=production\nPAGES_AUTH_MODE=bearer\nFRONTEND_ORIGIN=${FRONTEND_ORIGIN}\nHOST_PORT=3100\nGOOGLE_CLIENT_ID=${client}\nAPP_ORIGIN=https://old.example.com\nJWT_SECRET=do-not-print\nMYSQL_PASSWORD=preserve-exactly\n`;
+const realm = 'a' .repeat(64);
+const env = `# private\nNODE_ENV=production\nPAGES_AUTH_MODE=bearer\nFRONTEND_ORIGIN=${FRONTEND_ORIGIN}\nHOST_PORT=3100\nGOOGLE_CLIENT_ID=${client}\nAUTH_REALM_ID=${realm}\nAPP_ORIGIN=https://old.example.com\nJWT_SECRET=do-not-print\nMYSQL_PASSWORD=preserve-exactly\n`;
 const event = extra => JSON.stringify({ specversion: '1.0', type: 'v1.tcpip_forward.register.accepted', source: 'ssh://localhost.run/', id: 'localhost/abcd1234.lhr.life', data: 'ignored QR and other output', ...extra });
 
 test('only the exact accepted provider event yields a strictly bounded HTTPS origin', () => {
@@ -53,11 +54,11 @@ test('SSH uses no agent, private key, password, user configuration, or shell; Gi
 test('public validation requires health, exact Pages CORS, bearer mode and the configured client ID', async () => {
   const config = validatePrivateEnv(env);
   const calls = [];
-  const fetcher = async (url, options) => { calls.push({ url, options }); return { ok: true, headers: { get: () => FRONTEND_ORIGIN }, json: async () => url.endsWith('/health') ? { status: 'ok' } : { authMode: 'bearer', googleClientId: client } }; };
+  const fetcher = async (url, options) => { calls.push({ url, options }); return { ok: true, headers: { get: () => FRONTEND_ORIGIN }, json: async () => url.endsWith('/health') ? { status: 'ok' } : { authMode: 'bearer', googleClientId: client, authRealm: realm } }; };
   assert.equal(await verifyBackend(origin, config, { fetcher }), true);
   assert.equal(calls.length, 2);
   assert.ok(calls.every(call => call.options.redirect === 'error' && call.options.headers.Origin === FRONTEND_ORIGIN));
-  for (const invalidConfig of [{ authMode: 'cookie', googleClientId: client }, { authMode: 'bearer', googleClientId: 'wrong-client' }]) {
+  for (const invalidConfig of [{ authMode: 'cookie', googleClientId: client, authRealm: realm }, { authMode: 'bearer', googleClientId: 'wrong-client', authRealm: realm }, { authMode: 'bearer', googleClientId: client, authRealm: 'b'.repeat(64) }]) {
     await assert.rejects(verifyBackend(origin, config, { fetcher: async url => ({ ok: true, headers: { get: () => FRONTEND_ORIGIN }, json: async () => url.endsWith('/health') ? { status: 'ok' } : invalidConfig }) }));
   }
   await assert.rejects(verifyBackend(origin, config, { fetcher: async () => ({ ok: true, headers: { get: () => 'https://evil.example' }, json: async () => ({ status: 'ok' }) }) }));

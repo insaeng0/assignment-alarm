@@ -63,10 +63,11 @@ async function assertOwnedOrEmptyOutput(output) {
   throw new Error('Refusing to replace a nonempty directory not created by the Pages builder');
 }
 
-export async function buildPages({ apiBaseUrl = process.env.ASSIGNMENT_API_BASE_URL, outputDir = path.join(repositoryRoot, '_site') } = {}) {
+export async function buildPages({ apiBaseUrl = process.env.ASSIGNMENT_API_BASE_URL, authRealm = process.env.ASSIGNMENT_AUTH_REALM || '', outputDir = path.join(repositoryRoot, '_site') } = {}) {
   // The public URL is data, never shell/script code. No secrets belong in this build.
   const apiOrigin = validateApiOrigin(apiBaseUrl);
-  const config = { apiBaseUrl: apiOrigin, authMode: 'bearer' };
+  if (authRealm && !/^[a-f0-9]{64}$/.test(authRealm)) throw new Error('ASSIGNMENT_AUTH_REALM must be 64 lowercase hex characters');
+  const config = { apiBaseUrl: apiOrigin, authMode: 'bearer', ...(authRealm ? { authRealm } : {}) };
   const configVersion = createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 12);
   const output = path.resolve(outputDir);
   if (output === path.parse(output).root || output === repositoryRoot || output === sourceRoot || sourceRoot.startsWith(output + path.sep) || output.startsWith(sourceRoot + path.sep)) {

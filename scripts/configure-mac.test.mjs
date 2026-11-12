@@ -48,10 +48,11 @@ test('Mac setup keeps secrets private and preserves DB passwords when API URL ch
     assert.equal(first.FRONTEND_ORIGIN, 'https://kaneaigonan.github.io');
     assert.equal(first.COOKIE_SAMESITE, 'lax');
     assert.match(first.JWT_SECRET, /^[a-f0-9]{96}$/);
+    assert.match(first.AUTH_REALM_ID, /^[a-f0-9]{64}$/);
     for (const key of ['JWT_SECRET', 'MYSQL_PASSWORD', 'MYSQL_ROOT_PASSWORD']) assert.ok(!firstOutput.includes(first[key]));
     run('https://second.example.com');
     const second = parseEnv(await readFile(envPath, 'utf8'));
     assert.equal(second.APP_ORIGIN, 'https://second.example.com');
-    for (const key of ['JWT_SECRET', 'MYSQL_PASSWORD', 'MYSQL_ROOT_PASSWORD']) assert.equal(first[key], second[key]);
+    for (const key of ['JWT_SECRET', 'MYSQL_PASSWORD', 'MYSQL_ROOT_PASSWORD', 'AUTH_REALM_ID']) assert.equal(first[key], second[key]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -263,3 +263,36 @@ test('unsafe deployment configuration fails early with actionable errors', () =>
   assert.throws(() => loadApp({ FRONTEND_ORIGIN: '', PAGES_AUTH_MODE: 'bearer' }), /explicit HTTPS FRONTEND_ORIGIN/);
   assert.throws(() => loadApp({ PAGES_ACCESS_MAX_SESSIONS: '1000000' }), /PAGES_ACCESS_MAX_SESSIONS/);
 });
+
+test('remembered-session refresh and logout require the exact Pages Origin before reading credentials', async () => {
+  await serve(loadApp({ PAGES_AUTH_MODE: 'bearer', AUTH_REALM_ID: 'a'.repeat(64) }), async base => {
+    for (const route of ['refresh', 'logout']) {
+      for (const origin of [undefined, 'null', 'https://evil.example']) {
+        const request = options({ method: 'POST', origin: origin || '', site: 'none', body: { refreshToken: 'b'.repeat(64) + '.' + 'c'.repeat(64), requestId: 'd'.repeat(32) } });
+        const res = await fetch(`${base}/api/auth/${route}`, request);
+        assert.equal(res.status, 403);
+      }
+    }
+    const malformed = await fetch(`${base}/api/auth/refresh`, options({ method: 'POST', body: { refreshToken: 'invalid', requestId: 'd'.repeat(32) } }));
+    assert.equal(malformed.status, 401);
+    const invalidId = await fetch(`${base}/api/auth/refresh`, options({ method: 'POST', body: { refreshToken: 'b'.repeat(64) + '.' + 'c'.repeat(64), requestId: 'short' } }));
+    assert.equal(invalidId.status, 400);
+  });
+});
+
+test('an access credential issued after its refresh family was revoked cannot authorize a request', async () => {
+  const { RefreshSessions } = require('../lib/refresh-sessions');
+  const original = RefreshSessions.prototype.rotate;
+  RefreshSessions.prototype.rotate = async () => ({ familyId: 'f'.repeat(64), userId: 1, refreshToken: 'f'.repeat(64)+'.'+'e'.repeat(64), refreshExpiresAt: new Date(Date.now()+60_000).toISOString() });
+  const execute = fakePool.execute;
+  fakePool.execute = async function(sql, params) { if (sql.includes('FROM auth_refresh_families')) return [[]]; return execute.call(this, sql, params); };
+  try {
+    await serve(loadApp({ PAGES_AUTH_MODE: 'bearer', AUTH_REALM_ID: 'a'.repeat(64) }), async base => {
+      const issued = await fetch(`${base}/api/auth/refresh`, options({ method: 'POST', body: { refreshToken: 'opaque', requestId: 'd'.repeat(32) } }));
+      assert.equal(issued.status, 200);
+      const data = await issued.json();
+      const me = await fetch(`${base}/api/auth/me`, options({ token: data.accessToken }));
+      assert.equal(me.status, 401);
+    });
+  } finally { RefreshSessions.prototype.rotate = original; fakePool.execute = execute; }
+});

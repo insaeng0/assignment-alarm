@@ -85,3 +85,16 @@ test('Pages rebuild replaces only empty or builder-owned output and preserves un
     assert.match(await fs.readFile(path.join(owned, 'js/runtime-config.js'), 'utf8'), /next-api\.example\.com/);
   } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });
+
+test('Pages pins a stable public realm and invalidates runtime cache when it changes', async () => {
+  const { buildPages } = await builder();
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'assignment-pages-realm-'));
+  try {
+    const options = { apiBaseUrl: 'https://api.example.com', outputDir: path.join(temp, 'site') };
+    const first = await buildPages({ ...options, authRealm: 'a'.repeat(64) });
+    assert.match(await fs.readFile(path.join(options.outputDir, 'js/runtime-config.js'), 'utf8'), new RegExp('a'.repeat(64)));
+    const second = await buildPages({ ...options, authRealm: 'b'.repeat(64) });
+    assert.notEqual(first.runtimeConfigVersion, second.runtimeConfigVersion);
+    for (const authRealm of ['short', '<script>evil</script>', 'a'.repeat(63) + '\n']) await assert.rejects(buildPages({ ...options, authRealm }));
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
+});

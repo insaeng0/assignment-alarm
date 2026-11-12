@@ -50,8 +50,9 @@ export function validatePrivateEnv(text) {
   if (values.FRONTEND_ORIGIN !== FRONTEND_ORIGIN) throw invalid('FRONTEND_ORIGIN does not match the configured Pages origin.');
   if (!/^[1-9]\d{0,4}$/.test(values.HOST_PORT || '') || Number(values.HOST_PORT) > 65535) throw invalid('HOST_PORT must be an integer from 1 to 65535.');
   if (!/^[\w-]+\.apps\.googleusercontent\.com$/.test(values.GOOGLE_CLIENT_ID || '')) throw invalid('A configured Google web client ID is required.');
+  if (!/^[a-f0-9]{64}$/.test(values.AUTH_REALM_ID || '')) throw invalid('A stable AUTH_REALM_ID is required.');
   if (!/^APP_ORIGIN=/m.test(text)) throw invalid('APP_ORIGIN is missing.');
-  return { hostPort: Number(values.HOST_PORT), frontendOrigin: values.FRONTEND_ORIGIN, googleClientId: values.GOOGLE_CLIENT_ID };
+  return { hostPort: Number(values.HOST_PORT), frontendOrigin: values.FRONTEND_ORIGIN, googleClientId: values.GOOGLE_CLIENT_ID, authRealm: values.AUTH_REALM_ID };
 }
 
 export function replaceAppOrigin(text, origin) {
@@ -101,7 +102,7 @@ export async function verifyBackend(origin, config, { fetcher = fetch, signal } 
     const body = await response.json();
     if (response.headers.get('access-control-allow-origin') !== FRONTEND_ORIGIN) throw invalid('Public backend CORS origin does not match Pages.');
     if (route === '/api/health' && body?.status !== 'ok') throw new Error('Public backend health is not ready.');
-    if (route === '/api/public-config' && (body?.authMode !== 'bearer' || body.googleClientId !== config.googleClientId)) throw invalid('Public backend authentication configuration does not match private settings.');
+    if (route === '/api/public-config' && (body?.authMode !== 'bearer' || body.googleClientId !== config.googleClientId || body.authRealm !== config.authRealm)) throw invalid('Public backend authentication configuration does not match private settings.');
   }
   return true;
 }
@@ -157,7 +158,7 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
     const origin = candidate, owned = child;
     try {
       const latest = validatePrivateEnv(await fs.readFile(envPath, 'utf8'));
-      if (latest.hostPort !== config.hostPort || latest.googleClientId !== config.googleClientId) throw invalid('Private settings changed; restart the manual supervisor.');
+      if (latest.hostPort !== config.hostPort || latest.googleClientId !== config.googleClientId || latest.authRealm !== config.authRealm) throw invalid('Private settings changed; restart the manual supervisor.');
       await verifyBackend(origin, latest, { signal: aborter.signal });
       if (stopped || candidate !== origin || child !== owned) return;
       failures = 0;

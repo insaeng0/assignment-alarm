@@ -8,6 +8,7 @@ const { OAuth2Client } = require('google-auth-library');
 const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const { RefreshSessions, refreshSchema } = require('./lib/refresh-sessions');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -17,6 +18,7 @@ const APP_ORIGIN = readConfiguredOrigin('APP_ORIGIN');
 const CONFIGURED_FRONTEND_ORIGIN = readConfiguredOrigin('FRONTEND_ORIGIN');
 const FRONTEND_ORIGIN = CONFIGURED_FRONTEND_ORIGIN || APP_ORIGIN;
 const COOKIE_SAMESITE = String(process.env.COOKIE_SAMESITE || 'lax').trim().toLowerCase();
+const AUTH_REALM_ID = String(process.env.AUTH_REALM_ID || '').trim();
 const PAGES_AUTH_MODE = String(process.env.PAGES_AUTH_MODE || 'cookie').trim().toLowerCase();
 const JWT_SECRET = process.env.JWT_SECRET || (!IS_PRODUCTION ? crypto.randomBytes(32).toString('hex') : null);
 const TURNSTILE_SITE_KEY = process.env.TURNSTILE_SITE_KEY || null;
@@ -87,6 +89,7 @@ const ASSIGNMENT_WRITE_RATE_LIMIT = Math.max(Number.parseInt(process.env.ASSIGNM
 // const CHATBOT_RETRY_DELAY_MS = Math.max(Number.parseInt(process.env.CHATBOT_RETRY_DELAY_MS || '1500', 10) || 1500, 0);
 // const CHATBOT_RESPONSE_CACHE_TTL_MS = Math.max(Number.parseInt(process.env.CHATBOT_RESPONSE_CACHE_TTL_MS || '45000', 10) || 45000, 5000);
 const authAttempts = new Map();
+const refreshAttempts = new Map();
 // const chatbotAttempts = new Map();
 // const chatbotResponseCache = new Map();
 const assignmentImageAttempts = new Map();
@@ -137,6 +140,12 @@ if (!dbConfig.user || !dbConfig.password) {
 }
 
 const pool = mysql.createPool(dbConfig);
+const refreshSessions = new RefreshSessions({ pool, secret: JWT_SECRET, authRealm: AUTH_REALM_ID,
+  maxFamilies: PAGES_ACCESS_MAX_SESSIONS, onRevoke: revokeFamilyAccess });
+if (AUTH_REALM_ID && !/^[a-f0-9]{64}$/.test(AUTH_REALM_ID)) throw new Error('AUTH_REALM_ID must be 64 lowercase hex characters.');
+function revokeFamilyAccess(familyId) {
+  for (const [jti, session] of pagesAccessSessions) if (session.familyId === familyId) pagesAccessSessions.delete(jti);
+}
 
 function parseTrustProxySetting(value) {
   const normalized = String(value || '').trim().toLowerCase();
@@ -333,7 +342,7 @@ app.use('/api', (req, res, next) => {
 });
 // A Pages access credential must only be issued to the configured browser app.
 // Originless CLI requests cannot obtain either an access token or signup token.
-app.use(['/api/auth/google', '/api/auth/google/register'], (req, res, next) => {
+app.use(['/api/auth/google', '/api/auth/google/register', '/api/auth/refresh', '/api/auth/logout'], (req, res, next) => {
   if (PAGES_AUTH_MODE === 'bearer' && req.method === 'POST' && req.get('Origin') !== CONFIGURED_FRONTEND_ORIGIN) {
     return res.status(403).json({ error: '설정된 프런트엔드에서 로그인해주세요.' });
   }
@@ -469,36 +478,46 @@ function prunePagesAccessSessions() {
   }
 }
 
-function createLoginSession(res, user) {
-  if (PAGES_AUTH_MODE === 'cookie') {
-    setAuthCookie(res, createToken(user));
-    return {};
-  }
+function reservePagesAccess(id = 0) {
   prunePagesAccessSessions();
-  const id = user.id || user.user_id;
-  const ownSessions = [...pagesAccessSessions].filter(([, session]) => session.userId === id);
-  while (ownSessions.length >= PAGES_ACCESS_MAX_PER_USER) {
-    pagesAccessSessions.delete(ownSessions.shift()[0]);
+  if (id) {
+    const own = [...pagesAccessSessions].filter(([, session]) => session.userId === id);
+    while (own.length >= PAGES_ACCESS_MAX_PER_USER) pagesAccessSessions.delete(own.shift()[0]);
   }
   if (pagesAccessSessions.size >= PAGES_ACCESS_MAX_SESSIONS) {
-    const error = new Error('pages-session-capacity');
-    error.code = 'PAGES_SESSION_CAPACITY';
-    throw error;
+    throw Object.assign(new Error('pages-session-capacity'), { code: 'PAGES_SESSION_CAPACITY', status: 503 });
   }
   const jti = crypto.randomBytes(32).toString('hex');
+  pagesAccessSessions.set(jti, { userId: id, expiresAt: Date.now() + 5 * 60 * 1000, reserved: true });
+  return jti;
+}
+function issuePagesAccess(jti, id, familyId) {
+  const own = [...pagesAccessSessions].filter(([key, session]) => key !== jti && session.userId === id);
+  while (own.length >= PAGES_ACCESS_MAX_PER_USER) pagesAccessSessions.delete(own.shift()[0]);
   const exp = Math.floor(Date.now() / 1000) + PAGES_ACCESS_TTL_SECONDS;
   const accessToken = jwt.sign({ type: 'pages-access', id, jti, exp }, JWT_SECRET, {
     algorithm: 'HS256', issuer: 'assignment-alarm', audience: 'pages-access'
   });
-  pagesAccessSessions.set(jti, { userId: id, expiresAt: exp * 1000 });
+  pagesAccessSessions.set(jti, { userId: id, expiresAt: exp * 1000, familyId });
   return { accessToken, expiresAt: new Date(exp * 1000).toISOString() };
+}
+async function createLoginSession(res, user, rememberMe = false) {
+  if (PAGES_AUTH_MODE === 'cookie') { setAuthCookie(res, createToken(user)); return {}; }
+  const id = user.id || user.user_id;
+  const jti = reservePagesAccess(id);
+  try {
+    const remembered = rememberMe === true ? await refreshSessions.create(id) : null;
+    return { ...issuePagesAccess(jti, id, remembered?.familyId), ...(remembered ? {
+      refreshToken: remembered.refreshToken, refreshExpiresAt: remembered.refreshExpiresAt, authRealm: AUTH_REALM_ID
+    } : {}) };
+  } catch (error) { pagesAccessSessions.delete(jti); throw error; }
 }
 
 function verifyPagesAccessToken(token) {
   const decoded = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'], issuer: 'assignment-alarm', audience: 'pages-access' });
   prunePagesAccessSessions();
   const session = typeof decoded.jti === 'string' ? pagesAccessSessions.get(decoded.jti) : null;
-  if (decoded.type !== 'pages-access' || !Number.isSafeInteger(decoded.id) || decoded.id < 1 || !session || session.userId !== decoded.id) {
+  if (decoded.type !== 'pages-access' || !Number.isSafeInteger(decoded.id) || decoded.id < 1 || !session || session.reserved || session.userId !== decoded.id) {
     throw new Error('invalid-pages-access');
   }
   return decoded;
@@ -1041,6 +1060,13 @@ async function authMiddleware(req, res, next) {
     return res.status(401).json({ error: '로그인이 만료되었습니다. 다시 로그인해주세요.' });
   }
   try {
+    const familyId = PAGES_AUTH_MODE === 'bearer' ? pagesAccessSessions.get(decoded.jti)?.familyId : null;
+    if (familyId) {
+      // A rotation can finish while another request logs out. Recheck durable
+      // revocation before authorizing even a just-issued access token.
+      const [families] = await pool.execute('SELECT family_id FROM auth_refresh_families WHERE family_id = ? AND user_id = ? AND auth_realm_id = ? AND revoked = 0 AND expires_at_ms > ?', [familyId, decoded.id, AUTH_REALM_ID, Date.now()]);
+      if (!families.length) { pagesAccessSessions.delete(decoded.jti); return res.status(401).json({ error: '로그인이 해제되었습니다.' }); }
+    }
     req.currentUser = await getCurrentUser(decoded.id, { includePending: true });
     if (!req.currentUser) {
       res.setHeader('Set-Cookie', clearAuthCookie());
@@ -1058,7 +1084,7 @@ async function authMiddleware(req, res, next) {
 }
 
 async function getCurrentUser(userId, { includePending = false } = {}) {
-  const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, is_admin FROM users WHERE user_id = ?', [userId]);
+  const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [userId]);
   if (!rows[0]) return null;
   const user = withClassApproval(rows[0]);
   // A route may re-read a profile after the central authorization check. Never
@@ -1363,7 +1389,8 @@ app.get('/api/public-config', (_req, res) => {
     googleClientId: GOOGLE_CLIENT_ID || null,
     chatbotEnabled: false,
     imagesEnabled: ASSIGNMENT_IMAGES_ENABLED,
-    authMode: PAGES_AUTH_MODE
+    authMode: PAGES_AUTH_MODE,
+    authRealm: AUTH_REALM_ID || null
   });
 });
 
@@ -1400,7 +1427,7 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
         class_number: existingUser.class_number,
         is_admin: shouldGrantAdmin ? 1 : 0
       };
-      const session = createLoginSession(res, user);
+      const session = await createLoginSession(res, user, req.body.rememberMe);
       clearAuthRateLimit(req);
       return res.json({
         ...session,
@@ -1476,7 +1503,7 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
         class_number: existingUser.class_number,
         is_admin: shouldGrantAdmin ? 1 : 0
       };
-      const session = createLoginSession(res, user);
+      const session = await createLoginSession(res, user, req.body.rememberMe);
       clearAuthRateLimit(req);
       return res.json({
         ...session,
@@ -1512,7 +1539,7 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
     );
 
     const user = { id: result.insertId, name: uniqueName, grade, class_number, is_admin: isAdmin };
-    const session = createLoginSession(res, user);
+    const session = await createLoginSession(res, user, req.body.rememberMe);
     clearAuthRateLimit(req);
     return res.json({
       ...session,
@@ -1539,15 +1566,51 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
   }
 });
 
-app.post('/api/auth/logout', (req, res) => {
-  if (PAGES_AUTH_MODE === 'bearer') {
-    const authorization = String(req.get('Authorization') || '');
-    if (authorization.startsWith('Bearer ')) {
-      try { pagesAccessSessions.delete(verifyPagesAccessToken(authorization.slice(7)).jti); } catch { /* Logout remains idempotent for expired/revoked tokens. */ }
-    }
+function refreshRequestRateLimit(req, res, next) {
+  const limit = consumeRateLimitAttempt(refreshAttempts, req.ip || req.socket.remoteAddress || 'unknown', {
+    windowMs: 60_000, limit: 1000, maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
+  });
+  if (!limit.allowed) { res.setHeader('Retry-After', '60'); return res.status(429).json({ error: '잠시 후 다시 시도해주세요.', code: 'REFRESH_RATE_LIMITED' }); }
+  next();
+}
+app.post('/api/auth/refresh', refreshRequestRateLimit, async (req, res) => {
+  if (PAGES_AUTH_MODE !== 'bearer') return res.status(404).json({ error: '사용할 수 없는 인증 방식입니다.' });
+  let jti;
+  try {
+    jti = reservePagesAccess();
+    const session = await refreshSessions.rotate(req.body.refreshToken, req.body.requestId);
+    const user = await getCurrentUser(session.userId, { includePending: true });
+    if (!user) { await refreshSessions.revoke(session.refreshToken); throw Object.assign(new Error('invalid-user'), { status: 401 }); }
+    const access = issuePagesAccess(jti, session.userId, session.familyId);
+    return res.json({ ...access, refreshToken: session.refreshToken, refreshExpiresAt: session.refreshExpiresAt, authRealm: AUTH_REALM_ID, user });
+  } catch (error) {
+    if (jti) pagesAccessSessions.delete(jti);
+    const status = [400, 401, 409, 429, 503].includes(error.status) ? error.status : 503;
+    if (status === 429 || status === 503) res.setHeader('Retry-After', '60');
+    return res.status(status).json({ error: status === 401 ? '로그인이 만료되었습니다.' : status === 409 ? '다른 탭에서 로그인 상태를 갱신하고 있습니다.' : '로그인 상태를 갱신하지 못했습니다. 잠시 후 다시 시도해주세요.', code: error.code || 'REFRESH_UNAVAILABLE' });
   }
-  res.setHeader('Set-Cookie', clearAuthCookie());
-  res.json({ success: true });
+});
+app.post('/api/auth/logout', refreshRequestRateLimit, async (req, res) => {
+  try {
+    if (PAGES_AUTH_MODE === 'bearer') {
+      const authorization = String(req.get('Authorization') || '');
+      if (typeof req.body?.refreshToken === 'string') {
+        try { await refreshSessions.revoke(req.body.refreshToken); } catch (error) { if (error.status !== 401) throw error; }
+      }
+      if (authorization.startsWith('Bearer ')) {
+        try {
+          const decoded = verifyPagesAccessToken(authorization.slice(7));
+          const session = pagesAccessSessions.get(decoded.jti);
+          if (session?.familyId) {
+            await pool.execute('UPDATE auth_refresh_families SET revoked = 1 WHERE family_id = ? AND auth_realm_id = ?', [session.familyId, AUTH_REALM_ID]);
+            revokeFamilyAccess(session.familyId);
+          } else pagesAccessSessions.delete(decoded.jti);
+        } catch (error) { if (!['TokenExpiredError', 'JsonWebTokenError'].includes(error.name) && error.message !== 'invalid-pages-access') throw error; }
+      }
+    }
+    res.setHeader('Set-Cookie', clearAuthCookie());
+    res.json({ success: true });
+  } catch { res.status(503).json({ error: '서버의 로그아웃 처리에 실패했습니다. 다시 시도해주세요.' }); }
 });
 
 app.post('/api/uploads/assignment-image', authMiddleware, assignmentImageRateLimit, async (req, res) => {
@@ -2430,7 +2493,7 @@ async function init() {
       if (ASSIGNMENT_IMAGES_ENABLED) await fs.mkdir(ASSIGNMENT_IMAGE_DIR, { recursive: true });
       conn = await pool.getConnection();
       await conn.ping();
-      for (const statement of bootstrapSchema) await conn.execute(statement);
+      for (const statement of [...bootstrapSchema, ...refreshSchema]) await conn.execute(statement);
       await migrateSchema(conn);
       await cleanupOrphanedRecords(conn);
       await seedAdminAccount(conn);

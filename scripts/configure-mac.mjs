@@ -47,6 +47,7 @@ try {
   }
   const teacherAdmins = options['--teacher-admins'] || existing.ALLOW_TEACHER_NUMBER_ADMINS || 'false';
   if (!['true', 'false'].includes(teacherAdmins)) throw new Error('--teacher-admins에는 true 또는 false만 지정하세요.');
+  if (existing.AUTH_REALM_ID && !/^[a-f0-9]{64}$/.test(existing.AUTH_REALM_ID)) throw new Error('기존 AUTH_REALM_ID 형식이 올바르지 않습니다. 32바이트 hex 값을 사용하세요.');
   // Preserve generated secrets across runs so changing the tunnel URL never resets the DB.
   const secret = (key, bytes = 32) => existing[key] || randomBytes(bytes).toString('hex');
   const values = {
@@ -56,6 +57,8 @@ try {
     MYSQL_USER: existing.MYSQL_USER || 'assignment_user',
     MYSQL_PASSWORD: secret('MYSQL_PASSWORD'),
     JWT_SECRET: secret('JWT_SECRET', 48),
+    // Public stable namespace, independent of the temporary relay hostname.
+    AUTH_REALM_ID: secret('AUTH_REALM_ID'),
     NODE_ENV: 'production', TRUST_PROXY: '1', PORT: '3000', HOST_PORT: hostPort,
     COMPOSE_PROJECT_NAME: 'assignment-alarm-mac', ASSIGNMENT_CONTAINER_PREFIX: 'assignment-mac',
     APP_ORIGIN: apiOrigin, FRONTEND_ORIGIN: frontendOrigin,
@@ -77,6 +80,7 @@ try {
   console.log('2. docker compose --env-file .env.mac up -d --build');
   console.log('3. Google 승인된 JavaScript 원본에 추가: ' + frontendOrigin);
   console.log('4. GitHub 저장소 변수 ASSIGNMENT_API_BASE_URL에 설정: ' + apiOrigin);
+  console.log('5. GitHub 저장소 변수 ASSIGNMENT_AUTH_REALM에는 .env.mac의 AUTH_REALM_ID를 설정하세요.');
 } catch (error) {
   console.error(error.message);
   process.exit(1);
