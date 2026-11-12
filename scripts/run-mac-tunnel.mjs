@@ -45,11 +45,19 @@ export function acceptedTunnelOrigin(line) {
   if (typeof line !== 'string' || line.length > 256 * 1024) return null;
   let event;
   try { event = JSON.parse(line); } catch { return null; }
-  if (event?.specversion !== '1.0' || event.type !== 'v1.tcpip_forward.register.accepted' || event.source !== 'ssh://localhost.run/') return null;
+  if (event?.specversion !== '1.0') return null;
   try {
-    const raw = typeof event.id === 'string' && /^localhost\/[a-z0-9.-]+$/i.test(event.id)
-      ? 'https://' + event.id.slice('localhost/'.length)
-      : typeof event.data === 'string' ? event.data.match(/https:\/\/[^\s<>"']+/i)?.[0] : null;
+    let raw;
+    if (event.type === 'v1.tcpip_forward.register.accepted' && event.source === 'ssh://localhost.run/') {
+      raw = typeof event.id === 'string' && /^localhost\/[a-z0-9.-]+$/i.test(event.id)
+        ? 'https://' + event.id.slice('localhost/'.length)
+        : typeof event.data === 'string' ? event.data.match(/https:\/\/[^\s<>"']+/i)?.[0] : null;
+    } else if (event.type === 'run.localhost.tunnel.registered') {
+      const source = new URL(event.source);
+      if (source.protocol !== 'ssh:' || source.hostname !== 'localhost.run' || source.port || source.username || source.password || source.search || source.hash || !/^\/sessions\/[^/]+$/.test(source.pathname)) return null;
+      if (typeof event.data?.address !== 'string' || event.subject !== event.data.address) return null;
+      raw = 'https://' + event.data.address;
+    } else return null;
     if (!raw) return null;
     const safe = providerOrigin(raw);
     return ['.lhr.life', '.localhost.run'].some(suffix => new URL(safe).hostname.endsWith(suffix)) ? safe : null;

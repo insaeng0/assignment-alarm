@@ -88,3 +88,10 @@ test('adopting a verified recovery process is bound to its owner, start identity
   assert.equal(adoptionFingerprint(identity, 3100, 501), identity);
   for (const value of [identity.replace('501 ', '502 '), identity.replace(':3100 ', ':3200 '), identity.replace('cloudflared tunnel', 'other tunnel'), identity+' --token private']) assert.throws(() => adoptionFingerprint(value,3100,501));
 });
+
+test('current SSH provider events and in-process hostname rotations are recognized without accepting foreign sources', () => {
+  const registered = extra => JSON.stringify({ specversion:'1.0', type:'run.localhost.tunnel.registered', source:'ssh://localhost.run/sessions/192.0.2.1:1234', subject:'fresh.lhr.life', data:{address:'fresh.lhr.life'}, ...extra });
+  assert.equal(acceptedTunnelOrigin(registered()),'https://fresh.lhr.life');
+  assert.equal(acceptedTunnelOrigin(registered({subject:'rotated.localhost.run',data:{address:'rotated.localhost.run'}})),'https://rotated.localhost.run');
+  for (const value of [registered({source:'ssh://evil.example/sessions/1'}),registered({source:'ssh://localhost.run/sessions/'}),registered({subject:'different.lhr.life'}),registered({subject:'evil.example',data:{address:'evil.example'}}),registered({subject:'x.trycloudflare.com',data:{address:'x.trycloudflare.com'}})]) assert.equal(acceptedTunnelOrigin(value),null);
+});
