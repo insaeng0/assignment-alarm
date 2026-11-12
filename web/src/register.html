@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>과제 알리미 - 과제 등록</title>
+  <script src="js/theme-init.js?v=1"></script>
+  <link rel="stylesheet" href="css/style.css?v=28">
+  <link rel="stylesheet" href="css/redesign.css?v=1">
+  <link rel="stylesheet" href="css/secondary.css?v=1">
+</head>
+<body class="register-page">
+  <a class="skip-link" href="#mainContent">본문으로 이동</a>
+  <div class="app-shell">
+  <header class="app-header">
+    <a class="brand" href="calendar.html" aria-label="과제 알리미 홈"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="5" width="14" height="15" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M8 3.5v3M16 3.5v3M5 10h14M9 14l2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>과제 알리미</span></a>
+    <nav aria-label="주요 메뉴">
+      <a href="calendar.html">대시보드</a>
+      <a href="register.html" class="active" aria-current="page">과제 등록</a>
+      <a href="messages.html">공지사항</a>
+      <!-- AI 챗봇 메뉴는 재도입 전까지 비활성화합니다. <a href="chatbot.html">AI 챗봇</a> -->
+      <a href="settings.html">설정</a>
+    </nav>
+    <div class="user-info">
+      <div class="notification-area">
+        <button class="notification-btn" id="notificationBtn" type="button" aria-expanded="false" aria-controls="notificationPanel">알림 <span class="notification-badge" id="notificationBadge">0</span></button>
+        <div class="notification-panel" id="notificationPanel">
+          <div class="notification-panel-header">
+            <strong>최근 알림</strong>
+            <button class="notification-refresh-btn" id="notificationRefreshBtn" type="button">새로고침</button>
+          </div>
+          <div class="notification-list" id="notificationList">
+            <div class="notification-empty">불러오는 중...</div>
+          </div>
+        </div>
+      </div>
+      <span class="user-name" id="userName"></span>
+      <button class="logout-btn" type="button" data-logout>로그아웃</button>
+    </div>
+  </header>
+
+  <main class="container form-container" id="mainContent">
+    <div class="page-heading"><div><p class="eyebrow">SHARE &amp; PLAN</p><h1>과제 등록</h1><p class="page-description">우리 반의 할 일을 나누고, 마감일을 함께 챙겨요.</p></div></div>
+    <div class="register-layout">
+    <section class="card register-form-card" aria-labelledby="assignmentFormTitle">
+      <div class="section-head"><h2 id="assignmentFormTitle">새 과제 등록</h2><span class="section-kicker">우리 반에 공유</span></div>
+      <form id="assignmentForm" data-prevent-submit="true">
+        <div class="form-group">
+          <label for="taskTitle">과제명</label>
+          <input type="text" id="taskTitle" maxlength="120" placeholder="예: 통합과학 탐구 보고서" required>
+        </div>
+        <div class="form-group">
+          <label for="taskContent">상세 내용 <span class="optional-label">선택</span></label>
+          <textarea id="taskContent" maxlength="12000" placeholder="준비물, 제출 방법, 참고 링크를 적어주세요."></textarea>
+          <div class="content-helper">
+            <p class="field-help" id="imageUploadHint">설명이나 참고 링크를 적어주세요. 이미지도 추가할 수 있어요.</p><div class="content-helper-actions">
+              <button class="btn btn-secondary btn-sm" type="button" id="insertImageBtn">이미지 추가</button>
+            </div>
+            <input type="file" id="taskImageInput" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          </div>
+          <div class="content-preview" id="taskContentPreviewWrap" style="display:none">
+            <div class="content-preview-label">미리보기</div>
+            <div class="detail" id="taskContentPreview"></div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="taskDate">마감일</label>
+          <input type="date" id="taskDate" required>
+        </div>
+        <div class="form-group">
+          <label for="targetScope">등록 대상</label>
+          <input type="text" id="targetScope" readonly>
+        </div>
+        <div class="form-row" id="adminTargetRow" style="display:none">
+          <div class="form-group">
+            <label for="adminTargetGrade">대상 학년</label>
+          <select id="adminTargetGrade"></select>
+          </div>
+          <div class="form-group">
+            <label for="adminTargetClass">대상 반</label>
+          <select id="adminTargetClass"></select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" type="submit" id="saveBtn">등록하기</button>
+          <button class="btn btn-secondary" type="button" id="cancelEditBtn" style="display:none">수정 취소</button>
+          <button class="btn btn-secondary" type="button" data-nav="calendar.html">취소</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card register-list-card" aria-labelledby="assignmentListTitle">
+      <div class="section-head"><h2 id="assignmentListTitle">내가 등록한 과제</h2></div>
+    <div class="admin-filter-bar" id="adminAssignmentFilter">
+      <strong>조회 범위</strong>
+      <select aria-label="조회 학년" id="adminAssignmentGradeFilter"></select>
+      <select aria-label="조회 반" id="adminAssignmentClassFilter"></select>
+    </div>
+
+      <div id="myAssignments"><div class="empty-state">아직 등록한 과제가 없어요.<br>새 과제를 등록하면 여기에 모아둘게요.</div></div>
+    </section>
+    </div>
+  </main>
+  </div>
+
+  <script src="js/runtime-config.js?v=1"></script>
+  <script src="js/api.js?v=18"></script>
+  <script src="js/app-shell.js?v=3"></script>
+  <script src="js/register.js?v=2"></script>
+</body>
+</html>

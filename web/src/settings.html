@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>과제 알리미 - 설정</title>
+  <script src="js/theme-init.js?v=1"></script>
+  <link rel="stylesheet" href="css/style.css?v=28">
+  <link rel="stylesheet" href="css/redesign.css?v=1">
+  <link rel="stylesheet" href="css/secondary.css?v=1">
+</head>
+<body class="settings-page">
+  <a class="skip-link" href="#mainContent">본문으로 이동</a>
+  <div class="app-shell">
+  <header class="app-header">
+    <a class="brand" href="calendar.html" aria-label="과제 알리미 홈"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="5" width="14" height="15" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M8 3.5v3M16 3.5v3M5 10h14M9 14l2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>과제 알리미</span></a>
+    <nav aria-label="주요 메뉴">
+      <a href="calendar.html">대시보드</a>
+      <a href="register.html">과제 등록</a>
+      <a href="messages.html">공지사항</a>
+      <!-- AI 챗봇 메뉴는 재도입 전까지 비활성화합니다. <a href="chatbot.html">AI 챗봇</a> -->
+      <a href="settings.html" class="active" aria-current="page">설정</a>
+    </nav>
+    <div class="user-info">
+      <div class="notification-area">
+        <button class="notification-btn" id="notificationBtn" type="button" aria-expanded="false" aria-controls="notificationPanel">알림 <span class="notification-badge" id="notificationBadge">0</span></button>
+        <div class="notification-panel" id="notificationPanel">
+          <div class="notification-panel-header">
+            <strong>최근 알림</strong>
+            <button class="notification-refresh-btn" id="notificationRefreshBtn" type="button">새로고침</button>
+          </div>
+          <div class="notification-list" id="notificationList">
+            <div class="notification-empty">불러오는 중...</div>
+          </div>
+        </div>
+      </div>
+      <span class="user-name" id="userName"></span>
+      <button class="logout-btn" type="button" data-logout>로그아웃</button>
+    </div>
+  </header>
+
+  <main class="container" id="mainContent">
+    <div class="page-heading"><div><p class="eyebrow">MAKE IT YOURS</p><h1>나의 설정</h1><p class="page-description">알림부터 화면까지, 편한 방식으로 맞춰요.</p></div></div>
+    <div class="settings-layout">
+      <section class="card settings-profile-card" aria-labelledby="profileTitle">
+        <div class="section-head"><h2 id="profileTitle">내 프로필</h2><span class="section-kicker">학교 Google 계정</span></div>
+        <div class="profile-details">
+          <div class="profile-avatar" id="profileAvatar">?</div>
+          <div class="profile-fields">
+              <div class="form-group">
+                <label for="settingName">이름</label>
+          <input type="text" id="settingName" class="readonly-input" placeholder="이름" disabled>
+              </div>
+            <div class="form-group">
+              <label for="settingClass">소속</label>
+          <input type="text" id="settingClass" class="readonly-input" disabled>
+            </div>
+          </div>
+        </div>
+          <p class="settings-help-text">Google 계정의 이름과 프로필을 사용해요.</p>
+      </section>
+
+      <section class="card settings-preferences-card" aria-labelledby="preferencesTitle">
+        <div class="section-head"><h2 id="preferencesTitle">알림과 화면</h2></div>
+      <div class="settings-section">
+        <div class="toggle-row">
+          <label for="alarmToggle">과제 알림</label>
+          <button type="button" class="toggle on" id="alarmToggle" role="switch" aria-checked="true" aria-label="과제 알림 사용"></button>
+        </div>
+        <p class="settings-help-text">새 과제와 다가오는 마감일을 알려드려요.</p>
+      </div>
+
+      <div class="settings-section">
+        <div class="theme-mode-row">
+          <label for="themeModeSelect">화면 모드</label>
+          <select id="themeModeSelect" class="theme-mode-select">
+            <option value="system">시스템</option>
+            <option value="dark">다크모드</option>
+            <option value="light">라이트모드</option>
+          </select>
+        </div>
+        <p class="settings-help-text" id="themeModeHelp">시스템 설정을 따라갑니다.</p>
+      </div>
+
+      </section>
+      <section class="card settings-account-card" aria-labelledby="accountTitle">
+        <div><h2 id="accountTitle">계정</h2><p class="settings-help-text">이 기기에서 로그아웃할 수 있어요.</p></div>
+        <button class="btn btn-secondary" type="button" data-logout>로그아웃</button>
+      </section>
+    </div>
+
+      <div class="card settings-section admin-section" id="adminAssignmentSection" style="display:none">
+        <button class="admin-accordion-toggle open" type="button" data-target="adminAssignmentPanel" aria-controls="adminAssignmentPanel" aria-expanded="true">
+          <span>과제 관리</span>
+          <span class="admin-accordion-arrow">▾</span>
+        </button>
+        <div class="admin-accordion-panel show" id="adminAssignmentPanel">
+          <p class="admin-section-help">학년/반별 과제를 드롭다운으로 골라 확인하고 삭제할 수 있습니다.</p>
+          <div class="admin-filter-bar show admin-panel-filter">
+            <strong>과제 범위</strong>
+            <select aria-label="과제 조회 학년" id="adminSettingsAssignmentGrade"></select>
+            <select aria-label="과제 조회 반" id="adminSettingsAssignmentClass"></select>
+          </div>
+          <div id="adminAssignmentList"></div>
+          <div class="admin-pagination" id="adminAssignmentPager"></div>
+        </div>
+      </div>
+
+      <div class="card settings-section admin-section" id="adminMessageSection" style="display:none">
+        <button class="admin-accordion-toggle" type="button" data-target="adminMessagePanel" aria-controls="adminMessagePanel" aria-expanded="false">
+          <span>공지 관리</span>
+          <span class="admin-accordion-arrow">▾</span>
+        </button>
+        <div class="admin-accordion-panel" id="adminMessagePanel">
+          <p class="admin-section-help">학년 공지와 반 공지를 나눠서 보고 삭제할 수 있습니다.</p>
+          <div class="admin-filter-bar show admin-panel-filter">
+            <strong>공지 범위</strong>
+            <select aria-label="공지 조회 종류" id="adminSettingsMessageType">
+              <option value="grade">학년 공지</option>
+              <option value="class">반 공지</option>
+            </select>
+            <select aria-label="공지 조회 학년" id="adminSettingsMessageGrade"></select>
+            <select aria-label="공지 조회 반" id="adminSettingsMessageClass"></select>
+          </div>
+          <div id="adminMessageList"></div>
+          <div class="admin-pagination" id="adminMessagePager"></div>
+        </div>
+      </div>
+
+      <div class="card settings-section admin-section" id="adminUserSection" style="display:none">
+        <button class="admin-accordion-toggle" type="button" data-target="adminUserPanel" aria-controls="adminUserPanel" aria-expanded="false">
+          <span>사용자 관리</span>
+          <span class="admin-accordion-arrow">▾</span>
+        </button>
+          <div class="admin-accordion-panel" id="adminUserPanel">
+            <p class="admin-section-help">학교 계정과 실제 학년·반을 확인하고 소속을 승인하세요. 소속을 변경하면 다시 승인이 필요합니다.</p>
+          <div id="adminUserList"></div>
+          <div class="admin-pagination" id="adminUserPager"></div>
+        </div>
+      </div>
+  </main>
+  </div>
+
+    <script src="js/runtime-config.js?v=1"></script>
+  <script src="js/api.js?v=18"></script>
+  <script src="js/app-shell.js?v=3"></script>
+    <script src="js/settings.js?v=5"></script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+/* Supporting pages share the planner's type, colors and surfaces. */
+.register-page .section-head,
+.messages-page .section-head,
+.settings-page .section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.register-page .section-head h2,
+.messages-page .section-head h2,
+.settings-page h2 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.5;
+  font-weight: 750;
+  letter-spacing: -.035em;
+  color: var(--text-strong);
+}
+.section-kicker { font-size: .7rem; color: var(--text-subtle); white-space: nowrap; }
+.optional-label { margin-left: 5px; font-size: .7rem; font-weight: 400; color: var(--text-subtle); }
+.register-form-card #taskContent { min-height: 165px; line-height: 1.8; }
+.register-form-card .form-actions { padding-top: 8px; }
+.register-list-card { align-self: start; min-width: 0; }
+.register-list-card .assignment-item { align-items: flex-start; flex-wrap: wrap; gap: 13px; }
+.register-list-card .assignment-item .info { flex-basis: 100%; min-width: 0; }
+.register-list-card .assignment-item .actions { margin-left: auto; }
+.register-list-card .admin-filter-bar { margin-bottom: 20px; }
+.register-list-card .empty-state { padding: 52px 12px; line-height: 1.9; }
+
+.messages-page .notice-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 24px; align-items: start; }
+.messages-page .notice-tabs { flex-direction: column; margin: 0; gap: 8px; }
+.messages-page .notice-tab { flex: none; min-height: 76px; gap: 12px; padding: 17px 14px; border-color: transparent; background: transparent; }
+.messages-page .notice-tab.active { border-color: var(--border-panel); background: var(--bg-surface); box-shadow: var(--shadow-soft); }
+.messages-page .notice-tab .tab-icon { width: 32px; height: 32px; flex-shrink: 0; background: var(--bg-muted); font-size: 1.15rem; }
+.messages-page .notice-tab.active .tab-icon { background: var(--bg-accent-soft); color: var(--accent, #257a52); }
+.messages-page .notice-tab strong { font-size: .83rem; }
+.messages-page .notice-tab small { margin-top: 4px; font-size: .65rem; }
+.messages-page .notice-content-card { min-height: 420px; }
+.messages-page .message-item { padding: 25px 0; }
+.messages-page .message-item .msg-header { gap: 14px; }
+.messages-page .msg-content { margin-top: 14px; font-size: .91rem; line-height: 1.9; }
+.messages-page .message-form { margin-bottom: 14px; flex-wrap: wrap; }
+.messages-page .message-form textarea { flex-basis: 100%; min-height: 90px; }
+.messages-page .message-form .message-target-select { min-width: 100px; }
+.messages-page #messageList > .empty-state { padding: 80px 12px; }
+
+.settings-page .settings-layout { display: grid; grid-template-columns: 1.05fr 1fr; gap: 22px; align-items: stretch; }
+.settings-page .settings-layout > .card { margin-bottom: 0; min-width: 0; }
+.settings-page .profile-details { display: flex; align-items: flex-start; gap: 22px; padding-top: 9px; }
+.settings-page .profile-avatar { margin: 0; flex-shrink: 0; background: var(--bg-accent-soft); color: var(--accent, #257a52); }
+.settings-page .profile-fields { flex: 1; min-width: 0; }
+.settings-page .profile-fields .form-group { margin-bottom: 15px; }
+.settings-page .profile-fields .form-group:last-child { margin-bottom: 0; }
+.settings-page .profile-fields input:disabled { padding: 0; border: 0; background: transparent; font-size: .91rem; font-weight: 600; color: var(--text-strong); -webkit-text-fill-color: var(--text-strong); opacity: 1; }
+.settings-page .profile-fields label { font-size: .71rem; color: var(--text-subtle); margin-bottom: 5px; }
+.settings-page .settings-profile-card > .settings-help-text { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border-soft); }
+.settings-page .settings-preferences-card .settings-section { margin: 0; padding: 7px 0 20px; }
+.settings-page .settings-preferences-card .settings-section + .settings-section { border-top: 1px solid var(--border-soft); padding-top: 23px; padding-bottom: 0; }
+.settings-page .settings-preferences-card .settings-help-text { margin-top: 9px; }
+.settings-page .settings-preferences-card .toggle-row { padding: 0; }
+.settings-page .toggle.on { background: var(--accent, #257a52); }
+.settings-page .theme-mode-select { width: auto; min-width: 125px; }
+.settings-page .settings-account-card { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.settings-page .settings-account-card .settings-help-text { margin-top: 5px; }
+.settings-page .admin-section { margin: 22px 0 0; }
+
+.login-page .preview-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; padding: 14px 0 18px; margin-bottom: 5px; border-bottom: 1px solid var(--border-soft); }
+.login-page .preview-week span { display: grid; place-items: center; width: 31px; height: 31px; justify-self: center; border-radius: 50%; font-size: .71rem; color: var(--text-subtle); }
+.login-page .preview-week .current { background: var(--accent, #257a52); color: #fff; font-weight: 700; }
+
+@media (max-width: 1100px) {
+  .settings-page .settings-layout { grid-template-columns: 1fr; }
+  .messages-page .notice-layout { grid-template-columns: 160px minmax(0, 1fr); gap: 16px; }
+  .messages-page .notice-tab { padding-left: 7px; padding-right: 7px; }
+  .messages-page .notice-tab small { font-size: .6rem; }
+}
+@media (max-width: 700px) {
+  .messages-page .notice-layout { grid-template-columns: 1fr; gap: 17px; }
+  .messages-page .notice-tabs { flex-direction: row; gap: 8px; }
+  .messages-page .notice-tab { flex: 1; min-height: 62px; padding: 12px 16px; }
+  .messages-page .notice-tab small { display: none; }
+  .messages-page .notice-content-card { min-height: 330px; }
+  .register-page .section-head, .messages-page .section-head, .settings-page .section-head { margin-bottom: 20px; gap: 10px; }
+  .section-kicker { font-size: .64rem; }
+  .settings-page .settings-layout { gap: 16px; }
+  .settings-page .profile-details { gap: 18px; }
+  .settings-page .profile-avatar { width: 64px; height: 64px; font-size: 1.6rem; }
+  .settings-page .profile-avatar img { width: 64px !important; height: 64px !important; }
+  .settings-page .settings-account-card { gap: 14px; }
+  .settings-page .theme-mode-row { align-items: center; }
+}

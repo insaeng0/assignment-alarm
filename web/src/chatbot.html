@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>사용 중지된 기능</title><link rel="stylesheet" href="css/style.css?v=28"></head><body><main class="auth-page"><div class="auth-box"><h1>현재 사용하지 않는 기능입니다</h1><p>과제와 공지는 대시보드에서 확인하세요.</p><a class="btn btn-primary" href="calendar.html">대시보드로 이동</a></div></main></body></html>
+<!-- AI 챗봇 원본: 비용/개인정보 정책을 점검한 후 별도로 재도입합니다. 현재 이 마크업 및 스크립트는 실행되지 않습니다.
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>과제 알리미 - AI 챗봇</title>
+  <script src="js/theme-init.js?v=1"></script>
+  <link rel="stylesheet" href="css/style.css?v=27">
+</head>
+<body>
+  <div class="app-shell">
+  <header class="app-header">
+    <h1 data-nav="calendar.html">과제 알리미</h1>
+    <nav>
+      <a href="calendar.html">날짜화면</a>
+      <a href="register.html">과제등록</a>
+      <a href="messages.html">메세지</a>
+      <a href="chatbot.html" class="active">AI 챗봇</a>
+      <a href="settings.html">설정</a>
+    </nav>
+    <div class="user-info">
+      <div class="notification-area">
+        <button class="notification-btn" id="notificationBtn" type="button">알림 <span class="notification-badge" id="notificationBadge">0</span></button>
+        <div class="notification-panel" id="notificationPanel">
+          <div class="notification-panel-header">
+            <strong>최근 알림</strong>
+            <button class="notification-refresh-btn" id="notificationRefreshBtn" type="button">새로고침</button>
+          </div>
+          <div class="notification-list" id="notificationList">
+            <div class="notification-empty">불러오는 중...</div>
+          </div>
+        </div>
+      </div>
+      <span class="user-name" id="userName"></span>
+      <button class="logout-btn" type="button" data-logout>로그아웃</button>
+    </div>
+  </header>
+
+  <div class="container chatbot-shell">
+    <div class="card">
+      <div class="chatbot-toolbar">
+        <div>
+          <h3>AI 챗봇</h3>
+          <p class="admin-section-help">공부 계획, 개념 질문, 과제 정리 문구 작성 같은 작업을 도와주는 채팅 화면입니다.</p>
+        </div>
+        <button class="btn btn-secondary btn-sm" type="button" id="clearConversationBtn">대화 비우기</button>
+      </div>
+      <div class="chatbot-status" id="chatbotStatus">상태를 확인하는 중...</div>
+      <div class="chatbot-suggestions" id="chatbotSuggestions">
+        <button class="chatbot-suggestion" type="button" data-prompt="이번 주 공부 계획표를 간단히 짜줘">공부 계획표 만들기</button>
+        <button class="chatbot-suggestion" type="button" data-prompt="과제를 늦지 않게 하려면 어떻게 관리하면 좋을까?">과제 관리 팁</button>
+      </div>
+    </div>
+
+    <div class="card chatbot-board">
+      <div class="chatbot-messages" id="chatbotMessages">
+        <div class="chatbot-empty">대화를 시작하면 여기에 답변이 표시됩니다.</div>
+      </div>
+      <form id="chatbotForm" class="chatbot-composer" data-prevent-submit="true">
+        <textarea
+          id="chatbotInput"
+          class="chatbot-textarea"
+          placeholder="예: 내 과제를 정리할 수 있는 체크리스트 문구를 만들어줘"
+          maxlength="2000"
+        ></textarea>
+        <div class="chatbot-actions">
+          <button class="btn btn-primary" id="chatbotSendBtn" type="submit">질문 보내기</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  </div>
+
+  <script src="js/api.js?v=16"></script>
+  <script src="js/app-shell.js?v=1"></script>
+  <script src="js/chatbot.js?v=1"></script>
+</body>
+</html>
+
+-->

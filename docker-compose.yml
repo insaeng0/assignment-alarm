@@ -1,0 +1,94 @@
+services:
+  mysql:
+    build:
+      context: ./mysql
+      dockerfile: Dockerfile
+    container_name: assignment-mysql
+    expose:
+      - "3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-assignment_alarm}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - ./mysql/data:/var/lib/mysql
+      - ./mysql/conf:/etc/mysql/conf.d
+      - ./mysql/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: assignment-web
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./web/src:/app/src:ro
+      - assignment-images:/app/uploads/assignment-images
+    environment:
+      PORT: 3000
+      NODE_ENV: ${NODE_ENV:-development}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-}
+      PAGES_AUTH_MODE: ${PAGES_AUTH_MODE:-cookie}
+      PAGES_ACCESS_MAX_SESSIONS: ${PAGES_ACCESS_MAX_SESSIONS:-5000}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+      ASSIGNMENT_IMAGE_DIR: /app/uploads/assignment-images
+      ASSIGNMENT_IMAGE_MAX_STORAGE_MB: ${ASSIGNMENT_IMAGE_MAX_STORAGE_MB:-512}
+      ENABLE_ASSIGNMENT_IMAGE_UPLOADS: ${ENABLE_ASSIGNMENT_IMAGE_UPLOADS:-true}
+      JWT_SECRET: ${JWT_SECRET}
+      AUTH_RATE_MAX_TRACKED_CLIENTS: ${AUTH_RATE_MAX_TRACKED_CLIENTS:-5000}
+      ASSIGNMENT_IMAGE_RATE_LIMIT: ${ASSIGNMENT_IMAGE_RATE_LIMIT:-10}
+      ASSIGNMENT_IMAGE_RATE_WINDOW_MS: ${ASSIGNMENT_IMAGE_RATE_WINDOW_MS:-600000}
+      ASSIGNMENT_WRITE_RATE_LIMIT: ${ASSIGNMENT_WRITE_RATE_LIMIT:-20}
+      ASSIGNMENT_WRITE_RATE_WINDOW_MS: ${ASSIGNMENT_WRITE_RATE_WINDOW_MS:-600000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      ADMIN_GOOGLE_EMAILS: ${ADMIN_GOOGLE_EMAILS:-}
+      ADMIN_EXCLUDED_GOOGLE_EMAILS: ${ADMIN_EXCLUDED_GOOGLE_EMAILS:-}
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-assignment_alarm}
+    networks:
+      - app-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  assignment-images:

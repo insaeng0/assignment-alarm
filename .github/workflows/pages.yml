@@ -1,0 +1,64 @@
+name: Publish frontend to GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - web/src/**
+      - web/test/api.test.js
+      - web/test/pages.test.js
+      - scripts/build-pages.mjs
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: Public HTTPS API origin (optional if ASSIGNMENT_API_BASE_URL repository variable is set)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check frontend URL and session behavior
+        run: node --test web/test/api.test.js web/test/pages.test.js
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Build public frontend only
+        env:
+          ASSIGNMENT_API_BASE_URL: ${{ inputs.api_base_url || vars.ASSIGNMENT_API_BASE_URL }}
+        run: node scripts/build-pages.mjs
+      - name: Upload frontend artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy frontend
+        id: deployment
+        uses: actions/deploy-pages@v4

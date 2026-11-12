@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>과제 알리미 - 대시보드</title>
+  <script src="js/theme-init.js?v=1"></script>
+  <link rel="stylesheet" href="css/style.css?v=28">
+  <link rel="stylesheet" href="css/redesign.css?v=1">
+</head>
+<body class="dashboard-page">
+  <a class="skip-link" href="#mainContent">본문으로 이동</a>
+  <div class="app-shell">
+  <header class="app-header">
+    <a class="brand" href="calendar.html" aria-label="과제 알리미 홈"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="5" width="14" height="15" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M8 3.5v3M16 3.5v3M5 10h14M9 14l2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>과제 알리미</span></a>
+    <nav aria-label="주요 메뉴">
+      <a href="calendar.html" class="active" aria-current="page">대시보드</a>
+      <a href="register.html">과제 등록</a>
+      <a href="messages.html">공지사항</a>
+      <!-- AI 챗봇 메뉴는 재도입 전까지 비활성화합니다. <a href="chatbot.html">AI 챗봇</a> -->
+      <a href="settings.html">설정</a>
+    </nav>
+    <div class="user-info">
+      <div class="notification-area">
+        <button class="notification-btn" id="notificationBtn" type="button" aria-expanded="false" aria-controls="notificationPanel">알림 <span class="notification-badge" id="notificationBadge">0</span></button>
+        <div class="notification-panel" id="notificationPanel">
+          <div class="notification-panel-header">
+            <strong>최근 알림</strong>
+            <button class="notification-refresh-btn" id="notificationRefreshBtn" type="button">새로고침</button>
+          </div>
+          <div class="notification-list" id="notificationList">
+            <div class="notification-empty">불러오는 중...</div>
+          </div>
+        </div>
+      </div>
+      <span class="user-name" id="userName"></span>
+      <button class="logout-btn" type="button" data-logout>로그아웃</button>
+    </div>
+  </header>
+
+  <main class="container" id="mainContent">
+    <div class="admin-filter-bar" id="adminCalendarFilter">
+      <strong>조회 범위</strong>
+      <select aria-label="조회 학년" id="adminGradeFilter"></select>
+      <select aria-label="조회 반" id="adminClassFilter"></select>
+    </div>
+
+    <div class="page-heading dashboard-heading">
+      <div><p class="eyebrow" data-today-label>나의 과제 플래너</p><h1>과제 현황</h1><p class="page-description">마감일과 제출 현황을 확인하세요.</p></div>
+      <a class="btn btn-primary" href="register.html"><span aria-hidden="true">＋</span> 새 과제 등록</a>
+    </div>
+    <div class="stats" aria-label="과제 현황" aria-live="polite">
+      <div class="stat-card urgent"><div class="stat-top"><span class="label" id="urgentLabel">마감 임박</span><span class="stat-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2" stroke-linecap="round"/></svg></span></div><div class="stat-value"><span class="num" id="urgentCount">—</span><span>개</span></div><p>기한 지남 · 2일 이내 마감</p></div>
+      <div class="stat-card normal"><div class="stat-top"><span class="label" id="normalLabel">진행 중</span><span class="stat-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="4" width="14" height="17" rx="3"/><path d="M9 3v3h6V3M9 11h6m-6 4h4" stroke-linecap="round"/></svg></span></div><div class="stat-value"><span class="num" id="normalCount">—</span><span>개</span></div><p>마감까지 3일 이상 남은 과제</p></div>
+      <div class="stat-card done"><div class="stat-top"><span class="label" id="doneLabel">제출 완료</span><span class="stat-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="m8 12 3 3 5-6" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div><div class="stat-value"><span class="num" id="doneCount">—</span><span>개</span></div><p>제출을 완료한 과제</p></div>
+    </div>
+    <div class="dashboard-grid">
+      <section class="calendar-section" aria-labelledby="monthTitle">
+        <div class="calendar-toolbar">
+          <div class="calendar-title"><h2 id="monthTitle"></h2><div id="classScope" class="scope-text"></div></div>
+          <div class="calendar-nav"><button id="todayMonth" type="button">오늘</button><button id="prevMonth" type="button" aria-label="이전 달">‹</button><button id="nextMonth" type="button" aria-label="다음 달">›</button></div>
+        </div>
+        <div class="calendar-controls">
+          <div class="segmented-control" aria-label="표시할 과제"><button class="active" type="button" data-task-filter="all" aria-pressed="true">전체</button><button type="button" data-task-filter="pending" aria-pressed="false">미제출</button><button type="button" data-task-filter="done" aria-pressed="false">제출 완료</button></div>
+          <input class="task-search" type="search" id="taskSearch" placeholder="과제 검색" aria-label="과제 제목 검색" maxlength="200">
+        </div>
+        <div class="calendar-loading-banner" id="calendarLoadingBanner" role="status" hidden>과제를 불러오는 중입니다…</div>
+        <div class="calendar-error" id="calendarError" role="alert" hidden><span>과제를 불러오지 못했습니다. 다시 시도해주세요.</span><button class="btn btn-secondary btn-sm" id="retryAssignments" type="button">다시 시도</button></div>
+        <div class="calendar">
+          <div class="calendar-header" aria-hidden="true"><div>일</div><div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div></div>
+          <div class="calendar-body" id="calendarBody"></div>
+        </div>
+        <div class="calendar-footer"><span class="legend"><i class="urgent"></i>마감 임박 <i class="normal"></i>진행 중 <i class="done"></i>제출 완료</span><span>날짜를 눌러 과제를 확인하세요</span></div>
+      </section>
+      <aside class="dashboard-aside" aria-label="과제 요약">
+        <section class="upcoming-card"><div class="section-heading"><h2>먼저 챙겨요</h2><span class="small-count" id="upcomingCount">—</span></div><p class="aside-description">마감이 가까운 과제부터.</p><div id="upcomingList" aria-live="polite"><div class="empty-state">과제를 불러오는 중입니다…</div></div></section>
+        <section class="progress-card"><div class="progress-decoration" aria-hidden="true">✳</div><p class="eyebrow">MY PROGRESS</p><h2>과제 제출 현황</h2><p class="aside-description" id="progressDescription">우리 반 과제 현황을 확인해보세요.</p><div class="progress-line"><strong id="progressPercent">0%</strong><span id="progressCount">0 / 0개 완료</span></div><div class="progress-track" role="progressbar" aria-label="과제 제출 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="assignmentProgress"><span id="progressBar"></span></div></section>
+        <a class="class-note" href="messages.html"><span class="class-note-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 10 12-5v14L4 14v-4Zm2 5 2 5h3l-2-4m11-7 2-1m-2 7 2 1" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div><strong>우리 반 소식</strong><p>새로운 공지를 확인해보세요.</p></div><span class="note-arrow" aria-hidden="true">↗</span></a>
+      </aside>
+    </div>
+  </main>
+
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-content" tabindex="-1">
+      <h3 id="modalTitle"></h3>
+      <div id="taskList"></div>
+      <button class="btn btn-secondary btn-sm" style="margin-top:15px;width:100%" id="closeModal">닫기</button>
+    </div>
+  </div>
+  </div>
+
+  <script src="js/runtime-config.js?v=1"></script>
+  <script src="js/api.js?v=18"></script>
+  <script src="js/app-shell.js?v=3"></script>
+  <script src="js/calendar.js?v=3"></script>
+</body>
+</html>

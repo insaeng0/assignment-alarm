@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>과제 알리미 - 반 확인 대기</title>
+  <script src="js/theme-init.js?v=1"></script>
+  <link rel="stylesheet" href="css/style.css?v=28">
+  <link rel="stylesheet" href="css/redesign.css?v=1">
+  <link rel="stylesheet" href="css/secondary.css?v=1">
+</head>
+<body class="login-page pending-page">
+  <div class="app-shell">
+    <main class="auth-page" id="mainContent">
+      <section class="auth-box" aria-labelledby="pendingTitle">
+        <a class="brand" href="pending.html"><span class="brand-mark" aria-hidden="true">✓</span><span>과제 알리미</span></a>
+        <p class="eyebrow">CLASS VERIFICATION</p>
+        <h1 id="pendingTitle">반 확인 대기 중</h1>
+        <p>관리자가 소속을 확인하면<br>우리 반 과제와 공지를 이용할 수 있어요.</p>
+        <div class="card">
+          <strong id="pendingName">학교 계정 확인 중</strong>
+          <p class="page-description" id="pendingClass">선택한 학년과 반을 확인하고 있어요.</p>
+        </div>
+        <p class="login-status" id="pendingStatus" role="status" aria-live="polite">승인 상태를 확인하고 있습니다…</p>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="refreshApproval" type="button">승인 상태 새로고침</button>
+          <button class="btn btn-secondary" id="pendingLogout" type="button" data-logout>로그아웃</button>
+        </div>
+        <p class="auth-footnote">선택한 소속이 다르면 학교 관리자에게 확인을 요청해주세요.</p>
+      </section>
+    </main>
+  </div>
+  <script src="js/runtime-config.js?v=1"></script>
+  <script src="js/api.js?v=18"></script>
+  <script src="js/app-shell.js?v=3"></script>
+  <script src="js/pending.js?v=1"></script>
+</body>
+</html>

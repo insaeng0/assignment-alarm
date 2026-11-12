@@ -1,0 +1,6 @@
+.git
+**/node_modules
+.env*
+mysql/data
+web/src/uploads
+work

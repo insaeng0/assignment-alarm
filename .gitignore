@@ -1,0 +1,38 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+mysql/data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Log
+*.log
+
+# Local secrets
+.env
+.env.local
+.env.*
+!.env.example
+
+# Uploads
+web/src/uploads/
+
+# Private database/image backups
+backups/
+*.sql.gz
+*.dump
+*.pem
+*.key
+cloudflared-credentials*.json
+dist-pages/
+_site/
