@@ -28,8 +28,8 @@ let dbOptions;
 let completionAllowed = false;
 let visibleImage = false;
 let capturedInsert;
-let transferredDuringLookup = false;
-let transferLookupCount = 0;
+let calendarReadFixtures = null;
+let rosterFixtures = null;
 let assignmentWriteFails = false;
 const transactionCalls = [];
 let assignmentOwner = 1;
@@ -44,16 +44,12 @@ const fakePool = {
     }
     if (sql.includes('FROM users WHERE google_sub')) return [googleExisting ? [googleExisting] : []];
     if (sql.includes('FROM users WHERE user_id')) {
-      if (transferredDuringLookup && params[0] === 5) {
-        transferLookupCount += 1;
-        return [[{ user_id: 5, name: '이동 중인 학생', grade: transferLookupCount > 1 ? 2 : 1, class_number: 1, class_approved: transferLookupCount > 1 ? 0 : 1, is_admin: 0 }]];
-      }
-      return [users.has(params[0]) ? [users.get(params[0])] : []];
+      return [users.has(Number(params[0])) ? [users.get(Number(params[0]))] : []];
     }
     if (sql.startsWith('UPDATE users SET is_admin')) return [{ affectedRows: 1 }];
     if (sql.startsWith('UPDATE users SET google_email')) return [{ affectedRows: 1 }];
-    if (sql.startsWith('UPDATE users SET ') && (sql.includes('class_approved = ?') || sql.startsWith('UPDATE users SET grade'))) {
-      const target = users.get(params.at(-1));
+    if (sql.startsWith('UPDATE users SET ')) {
+      const target = users.get(Number(params.at(-1)));
       const fields = sql.slice('UPDATE users SET '.length, sql.indexOf(' WHERE')).split(', ').map(field => field.split(' ')[0]);
       fields.forEach((field, index) => { if (target) target[field] = params[index]; });
       return [{ affectedRows: target ? 1 : 0 }];
@@ -62,6 +58,9 @@ const fakePool = {
       capturedInsert = { sql, params };
       return [{ insertId: 101 }];
     }
+    if (calendarReadFixtures && sql.includes('FROM assignments a')) return [calendarReadFixtures];
+    if (rosterFixtures && sql.includes('FROM users u') && sql.includes('LEFT JOIN user_assignments')) return [rosterFixtures];
+    if (rosterFixtures && sql.startsWith('SELECT assignment_id, title, target_grade')) return [[{ assignment_id: 42, title: '우리 반 과제', target_grade: 1, target_class: 2 }]];
     if (sql.startsWith('SELECT assignment_id FROM assignments WHERE assignment_id')) return [completionAllowed ? [{ assignment_id: params[0] }] : []];
     if (sql.startsWith('SELECT assignment_id FROM assignments WHERE INSTR')) return [visibleImage ? [{ assignment_id: 42 }] : []];
     if (sql.startsWith('INSERT INTO user_assignments')) return [{ affectedRows: completionAllowed ? 1 : 0 }];
@@ -301,77 +300,84 @@ test('health checks distinguish a connected database from an outage', async () =
   healthDown = false;
 });
 
-test('pending class membership can inspect identity and log out but cannot read or mutate class data', async () => {
-  users.set(4, { user_id: 4, name: '승인 대기 학생', grade: 1, class_number: 1, class_approved: 0, is_admin: 0 });
+test('class approval no longer blocks existing or newly selected classes and legacy flags stay untouched', async () => {
+  users.set(4, { user_id: 4, name: '학생', grade: 1, class_number: 1, class_approved: 0, is_admin: 0 });
   const identity = await request('/api/auth/me', { token: session(4) });
   assert.equal(identity.response.status, 200);
-  assert.equal(identity.data.is_class_approved, false);
-  const protectedRoutes = [
-    ['/api/assignments', 'GET'], ['/api/messages', 'GET'], ['/api/notifications', 'GET'],
-    ['/api/users/4', 'GET'], ['/api/users/4/assignments', 'GET'], ['/api/user-assignments/4', 'GET'],
-    ['/api/assignments', 'POST'], ['/api/user-assignments', 'PUT'], ['/api/users/4', 'PUT'],
-    ['/api/admin/users/4', 'PUT'], ['/api/uploads/assignment-image', 'POST'],
-    [`/uploads/assignment-images/4-1234-${'a'.repeat(32)}.png`, 'GET']
-  ];
-  for (const [route, method] of protectedRoutes) {
-    const result = await request(route, { method, token: session(4), ...(method === 'GET' ? {} : { body: { class_approved: true } }) });
-    assert.equal(result.response.status, 403, route);
-    assert.equal(result.data.code, 'CLASS_APPROVAL_REQUIRED', route);
+  assert.equal(identity.data.is_class_approved, true);
+  assert.equal(identity.data.can_complete_assignments, true);
+  for (const route of ['/api/assignments', '/api/messages', '/api/notifications', '/api/users/4', '/api/users/4/assignments', '/api/user-assignments/4']) {
+    const result = await request(route, { token: session(4) });
+    assert.equal(result.response.status, 200, route);
+    assert.notEqual(result.data.code, 'CLASS_APPROVAL_REQUIRED');
   }
-  assert.equal((await request('/api/auth/logout', { method: 'POST', token: session(4) })).response.status, 200);
-  assert.equal((await request('/api/admin/users', { token: session(2) })).response.status, 200);
+  assert.equal(users.get(4).class_approved, 0, 'legacy column is preserved without being an access gate');
 });
 
-test('only admins approve classes and moving a student resets approval unless explicitly reapproved', async () => {
+test('profile ownership and authority remain enforced while admins edit classes without approval', async () => {
   const student = users.get(4);
-  assert.equal((await request('/api/admin/users/4', { method: 'PUT', token: session(), body: { class_approved: true } })).response.status, 403);
-  transactionCalls.length = 0;
-  let result = await request('/api/admin/users/4', { method: 'PUT', token: session(2), body: { class_approved: true } });
-  assert.equal(result.response.status, 200);
-  assert.equal(student.class_approved, 1);
-  assert.ok(queries.some(({ sql }) => sql.includes('class_approved FROM users') && sql.endsWith('FOR UPDATE')));
-  assert.deepEqual(transactionCalls, ['begin', 'commit', 'release']);
-  assert.equal((await request('/api/auth/me', { token: session(4) })).data.is_class_approved, true);
-  for (const body of [{ grade: 2 }, { class_number: 2 }, { class_approved: true }, { is_class_approved: true }, { is_admin: true }]) {
+  for (const body of [{ grade: 2 }, { class_number: 3 }, { is_admin: true }, { can_complete_assignments: true }, { google_email: '26_40@bssm.hs.kr' }, { google_sub: 'forged' }]) {
     assert.equal((await request('/api/users/4', { method: 'PUT', token: session(4), body })).response.status, 403);
   }
-  result = await request('/api/admin/users/4', { method: 'PUT', token: session(2), body: { grade: 2 } });
+  assert.equal((await request('/api/users/3', { method: 'PUT', token: session(4), body: { is_alarm_enabled: true } })).response.status, 403);
+  assert.equal((await request('/api/admin/users/4', { method: 'PUT', token: session(4), body: { grade: 1 } })).response.status, 403);
+  for (const body of [{ grade: 0 }, { grade: 4 }, { class_number: 5 }, { grade: '2x' }]) {
+    assert.equal((await request('/api/admin/users/4', { method: 'PUT', token: session(2), body })).response.status, 400);
+  }
+  student.class_approved = 1;
+  const result = await request('/api/admin/users/4', { method: 'PUT', token: session(2), body: { grade: 3, class_number: 2 } });
   assert.equal(result.response.status, 200);
-  assert.equal(student.grade, 2);
-  assert.equal(student.class_approved, 0);
-  assert.equal((await request('/api/assignments', { token: session(4) })).data.code, 'CLASS_APPROVAL_REQUIRED');
-  result = await request('/api/admin/users/4', { method: 'PUT', token: session(2), body: { grade: 3, class_number: 2, class_approved: true } });
-  assert.equal(result.response.status, 200);
-  assert.equal(student.class_approved, 1);
   assert.equal(student.grade, 3);
   assert.equal(student.class_number, 2);
-  const list = await request('/api/admin/users', { token: session(2) });
-  assert.equal(list.data.items.find(item => item.user_id === 4).is_class_approved, true);
+  assert.equal(student.class_approved, 1, 'class edits do not reset the unused legacy approval column');
+  assert.equal(result.data.is_class_approved, true);
+  assert.equal(result.data.can_complete_assignments, true);
 });
 
-test('migration adds unverified class membership as pending and never autoapproves existing users', async () => {
-  for (const exists of [false, true]) {
-    const statements = [];
-    await migrateSchema({ async execute(sql) {
-      statements.push(sql);
-      if (sql.includes('INFORMATION_SCHEMA.COLUMNS') && sql.includes("COLUMN_NAME = 'class_approved'")) return [exists ? [{ COLUMN_NAME: 'class_approved' }] : []];
-      return [[]];
-    } });
-    const approvalChanges = statements.filter(sql => /ALTER TABLE users ADD COLUMN class_approved/.test(sql));
-    assert.equal(approvalChanges.length, exists ? 0 : 1);
-    if (!exists) assert.match(approvalChanges[0], /NOT NULL DEFAULT 0/);
-    assert.ok(!statements.some(sql => /UPDATE users SET class_approved\s*=\s*1/.test(sql)));
-  }
-});
-
-test('a concurrent unapproved class transfer cannot introduce a newly readable class scope', async () => {
-  transferredDuringLookup = true;
-  transferLookupCount = 0;
+test('verified student admins complete only their own class as themselves while teacher admins stay read-only', async () => {
+  users.set(6, { user_id: 6, name: '학생 관리자', grade: 1, class_number: 2, is_admin: 1, google_sub: 'student-admin-sub', google_email: '26_40@bssm.hs.kr' });
+  users.set(7, { user_id: 7, name: '선생님', grade: 1, class_number: 2, is_admin: 1, google_sub: 'teacher-sub', google_email: 'teacher12@bssm.hs.kr' });
+  users.set(8, { user_id: 8, name: '별도 관리자', grade: 1, class_number: 2, is_admin: 1, google_sub: 'other-admin-sub', google_email: 'staff@bssm.hs.kr' });
+  assert.equal((await request('/api/auth/me', { token: session(6) })).data.can_complete_assignments, true);
+  assert.equal((await request('/api/auth/me', { token: session(7) })).data.can_complete_assignments, false);
+  assert.equal((await request('/api/auth/me', { token: session(8) })).data.can_complete_assignments, false);
+  assert.equal((await request('/api/auth/me', { token: session(6) })).data.google_sub, undefined);
+  completionAllowed = true;
   const before = queries.length;
+  let result = await request('/api/user-assignments', { method: 'PUT', token: session(6), body: { assignment_id: 42, is_completed: true, user_id: 3, target_grade: 3, target_class: 4 } });
+  assert.equal(result.response.status, 200);
+  const write = queries.slice(before).find(({ sql }) => sql.startsWith('INSERT INTO user_assignments'));
+  assert.deepEqual(write.params, [6, 1, 42, 1, 2, 1]);
+  assert.match(write.sql, /target_grade = \? AND \(target_class = \? OR target_class IS NULL\)/);
+  for (const id of [7, 8]) {
+    result = await request('/api/user-assignments', { method: 'PUT', token: session(id), body: { assignment_id: 42, is_completed: true, can_complete_assignments: true } });
+    assert.equal(result.response.status, 403);
+  }
+  completionAllowed = false;
+  assert.equal((await request('/api/user-assignments', { method: 'PUT', token: session(6), body: { assignment_id: 99, is_completed: true } })).response.status, 403);
+  assert.equal((await request('/api/user-assignments/3', { token: session(6) })).response.status, 403);
+});
+
+test('admin calendars join only their own class completion and teacher rosters include student admins', async () => {
+  calendarReadFixtures = [{ assignment_id: 42, target_grade: 1, target_class: 2, is_completed: 1 }, { assignment_id: 99, target_grade: 2, target_class: 1, is_completed: 0 }];
   try {
-    const result = await request('/api/assignments', { token: session(5) });
-    assert.equal(result.response.status, 404);
-    assert.equal(transferLookupCount, 2);
-    assert.ok(!queries.slice(before).some(({ sql }) => sql.includes('FROM assignments')));
-  } finally { transferredDuringLookup = false; }
+    for (const route of ['/api/assignments', '/api/users/6/assignments']) {
+      const before = queries.length;
+      const result = await request(route, { token: session(6) });
+      assert.equal(result.response.status, 200);
+      const read = queries.slice(before).find(({ sql }) => sql.includes('FROM assignments a'));
+      assert.deepEqual(read.params, [6, 1, 2]);
+      assert.match(read.sql, /ua.user_id = \?/);
+      assert.match(read.sql, /a.target_grade = \? AND \(a.target_class = \? OR a.target_class IS NULL\)/);
+      assert.equal(result.data[0].is_completed, 1);
+      assert.equal(result.data[1].is_completed, 0);
+    }
+  } finally { calendarReadFixtures = null; }
+  rosterFixtures = [users.get(1), users.get(6), users.get(7), users.get(8)].map(user => ({ ...user, is_completed: 1 }));
+  try {
+    const result = await request('/api/assignments/42/status', { token: session(7) });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(result.data.students.map(user => user.user_id), [1, 6]);
+    assert.ok(result.data.students.every(user => user.google_sub === undefined && user.google_email === undefined));
+  } finally { rosterFixtures = null; }
 });

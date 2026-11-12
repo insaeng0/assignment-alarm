@@ -10,8 +10,21 @@ let taskFilter = 'all';
 let taskSearch = '';
 let modalDate = null;
 let previousFocus = null;
-const isCompleted = (task) => Number(task.is_completed) === 1 || task.is_completed === true;
+function canCompleteAssignment(user, task) {
+  if (user?.can_complete_assignments !== true || !task) return false;
+  const grade = Number(user.grade);
+  const classNumber = Number(user.class_number);
+  return Number.isInteger(grade) && grade >= 1 && Number.isInteger(classNumber) && classNumber >= 1
+    && Number(task.target_grade) === grade
+    && (task.target_class === null || Number(task.target_class) === classNumber);
+}
+const isCompleted = (task) => canCompleteAssignment(API.getUser(), task) && (Number(task.is_completed) === 1 || task.is_completed === true);
 const dateString = (date) => AppUI.localDate(date);
+const taskScopeLabel = (task) => `${task.target_grade}학년 ${task.target_class === null ? '전체' : task.target_class + '반'}`;
+function taskMeta(task, user) {
+  const status = canCompleteAssignment(user, task) ? isCompleted(task) ? '제출 완료' : '미제출' : '열람 전용';
+  return `${task.creator_name || '우리 반'} · ${user?.is_admin ? taskScopeLabel(task) + ' · ' : ''}${status}`;
+}
 
 API.requireAuth();
 
@@ -72,11 +85,11 @@ function initAdminFilters(user) {
 
 function getVisibleAssignments() {
   if (!API.getUser()?.is_admin) return assignments;
-  return assignments.filter((task) => (adminGradeFilter === 'all' || String(task.target_grade) === adminGradeFilter) && (adminClassFilter === 'all' || String(task.target_class) === adminClassFilter));
+  return assignments.filter((task) => (adminGradeFilter === 'all' || String(task.target_grade) === adminGradeFilter) && (adminClassFilter === 'all' || task.target_class === null || String(task.target_class) === adminClassFilter));
 }
 function getMatchingAssignments() {
   return getVisibleAssignments().filter((task) => {
-    const stateMatches = taskFilter === 'all' || (taskFilter === 'done' ? isCompleted(task) : !isCompleted(task));
+    const stateMatches = taskFilter === 'all' || (canCompleteAssignment(API.getUser(), task) && (taskFilter === 'done' ? isCompleted(task) : !isCompleted(task)));
     return stateMatches && String(task.title || '').toLocaleLowerCase('ko').includes(taskSearch);
   });
 }
@@ -96,7 +109,7 @@ function renderCalendar(forceLoading = assignmentsLoading) {
   const threshold = urgentDate();
   document.getElementById('monthTitle').textContent = `${year}년 ${month + 1}월`;
   document.getElementById('classScope').textContent = user?.is_admin
-    ? `${adminGradeFilter === 'all' ? '전체 학년' : adminGradeFilter + '학년'} · ${adminClassFilter === 'all' ? '전체 반' : adminClassFilter + '반'}`
+    ? `${adminGradeFilter === 'all' ? '전체 학년' : adminGradeFilter + '학년'} · ${adminClassFilter === 'all' ? '전체 반' : adminClassFilter + '반'} · ${user.can_complete_assignments === true ? '제출 현황은 내 반 기준' : '제출 체크 대상 계정 아님'}`
     : user?.grade && user?.class_number ? `${user.grade}학년 ${user.class_number}반의 과제 캘린더` : '';
   document.getElementById('calendarLoadingBanner').hidden = !forceLoading;
   document.getElementById('calendarError').hidden = !assignmentsError;
@@ -109,7 +122,7 @@ function renderCalendar(forceLoading = assignmentsLoading) {
     const tasks = matching.filter((task) => task.due_date === date).sort((a, b) => Number(isCompleted(a)) - Number(isCompleted(b)));
     const tags = tasks.slice(0, 2).map((task) => {
       const cls = isCompleted(task) ? 'done' : task.due_date <= threshold ? 'urgent' : 'normal';
-      const title = user?.is_admin ? `${task.target_grade}학년 ${task.target_class}반 · ${task.title}` : task.title;
+      const title = user?.is_admin ? `${taskScopeLabel(task)} · ${task.title}` : task.title;
       return `<span class="task-tag ${cls}">${API.escapeHTML(title)}</span>`;
     }).join('');
     const label = `${month + 1}월 ${d}일${date === today ? ', 오늘' : ''}, 과제 ${tasks.length}개`;
@@ -120,18 +133,24 @@ function renderCalendar(forceLoading = assignmentsLoading) {
   updateOverview(visible, forceLoading);
 }
 
-function updateOverview(visible, loading) {
+function updateOverview(visibleAssignments, loading) {
+  const user = API.getUser();
+  const canComplete = user?.can_complete_assignments === true;
+  const visible = canComplete ? visibleAssignments.filter(task => canCompleteAssignment(user, task)) : visibleAssignments;
+  document.getElementById('urgentLabel').textContent = !canComplete ? '조회 범위 마감 임박' : user?.is_admin ? '내 반 마감 임박' : '마감 임박';
+  document.getElementById('normalLabel').textContent = !canComplete ? '조회 범위 진행 중' : user?.is_admin ? '내 반 진행 중' : '진행 중';
+  document.getElementById('doneLabel').textContent = !canComplete ? '개인 완료 대상 없음' : user?.is_admin ? '내 제출 완료' : '제출 완료';
   const pending = visible.filter((task) => !isCompleted(task));
   const completed = visible.length - pending.length;
   const urgent = pending.filter((task) => task.due_date <= urgentDate()).length;
   for (const [id, count] of [['urgentCount', urgent], ['normalCount', pending.length - urgent], ['doneCount', completed]]) {
-    document.getElementById(id).textContent = loading ? '—' : count;
+    document.getElementById(id).textContent = loading || (!canComplete && id === 'doneCount') ? '—' : count;
   }
   document.getElementById('upcomingCount').textContent = loading ? '—' : `${pending.length}개`;
   const list = document.getElementById('upcomingList');
   if (loading) list.innerHTML = '<div class="empty-state">과제를 불러오는 중입니다…</div>';
   else if (assignmentsError && visible.length === 0) list.innerHTML = '<div class="empty-state">잠시 후 다시 시도해주세요.</div>';
-  else if (pending.length === 0) list.innerHTML = `<div class="empty-state">${visible.length ? '모든 과제를 제출했어요!<br>잠깐 쉬어가도 좋아요.' : '아직 등록된 과제가 없어요.<br>새 과제를 등록해보세요.'}</div>`;
+  else if (pending.length === 0) list.innerHTML = `<div class="empty-state">${!canComplete ? '이 조회 범위에 등록된 과제가 없어요.' : visible.length ? '모든 과제를 제출했어요!<br>잠깐 쉬어가도 좋아요.' : visibleAssignments.length ? '이 조회 범위에 내 반 과제가 없어요.' : '아직 등록된 과제가 없어요.<br>새 과제를 등록해보세요.'}</div>`;
   else {
     const today = new Date();
     const todayUTC = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
@@ -144,11 +163,12 @@ function updateOverview(visible, loading) {
     }).join('');
   }
   const percentage = visible.length ? Math.round(completed / visible.length * 100) : 0;
-  document.getElementById('progressPercent').textContent = loading ? '—' : `${percentage}%`;
-  document.getElementById('progressCount').textContent = loading ? '불러오는 중' : `${completed} / ${visible.length}개 완료`;
+  document.getElementById('progressPercent').textContent = loading || !canComplete ? '—' : `${percentage}%`;
+  document.getElementById('progressCount').textContent = loading ? '불러오는 중' : !canComplete ? '개인 제출 대상 없음' : `${completed} / ${visible.length}개 완료`;
   document.getElementById('progressBar').style.width = `${percentage}%`;
   document.getElementById('assignmentProgress').setAttribute('aria-valuenow', String(percentage));
-  document.getElementById('progressDescription').textContent = pending.length ? `미제출 과제가 ${pending.length}개 남아 있어요.` : visible.length ? '모든 과제를 제출했어요.' : '등록된 과제가 없습니다.';
+  document.getElementById('progressDescription').textContent = !canComplete ? '이 계정은 제출 체크를 사용하지 않습니다.'
+    : `${user?.is_admin ? '내 반 기준 · ' : ''}${pending.length ? `미제출 과제가 ${pending.length}개 남아 있어요.` : visible.length ? '모든 과제를 제출했어요.' : '제출 체크할 내 반 과제가 없습니다.'}`;
 }
 
 function openModal(date, { allTasks = false, keepFocus = false } = {}) {
@@ -158,7 +178,7 @@ function openModal(date, { allTasks = false, keepFocus = false } = {}) {
   const user = API.getUser();
   const [year, month, day] = date.split('-').map(Number);
   document.getElementById('modalTitle').textContent = `${year}년 ${month}월 ${day}일 과제`;
-  document.getElementById('taskList').innerHTML = tasks.length ? tasks.map((task) => `<div class="assignment-item${isCompleted(task) ? ' done' : ''}"><div class="info"><div class="title">${API.escapeHTML(task.title)}</div>${task.content ? `<div class="detail">${API.renderTextWithLinks(task.content)}</div>` : ''}<div class="meta">${API.escapeHTML(task.creator_name || '우리 반')} · ${user?.is_admin ? `${task.target_grade}학년 ${task.target_class}반` : isCompleted(task) ? '제출 완료' : '미제출'}</div></div><div class="actions">${!user?.is_admin ? `<label class="submit-check"><input type="checkbox" class="modal-submit-toggle" data-id="${Number(task.assignment_id)}" ${isCompleted(task) ? 'checked' : ''}><span>제출 완료</span></label>` : ''}${user && (Number(task.created_by) === Number(user.id) || user.is_admin) ? `<button type="button" class="btn btn-danger btn-sm modal-delete" data-id="${Number(task.assignment_id)}">삭제</button>` : ''}</div></div>`).join('') : '<div class="empty-state">이 날짜에 표시할 과제가 없어요.<br>필터를 확인하거나 새 과제를 등록해보세요.</div><a class="btn btn-primary" href="register.html">새 과제 등록</a>';
+  document.getElementById('taskList').innerHTML = tasks.length ? tasks.map((task) => `<div class="assignment-item${isCompleted(task) ? ' done' : ''}"><div class="info"><div class="title">${API.escapeHTML(task.title)}</div>${task.content ? `<div class="detail">${API.renderTextWithLinks(task.content)}</div>` : ''}<div class="meta">${API.escapeHTML(taskMeta(task, user))}</div></div><div class="actions">${canCompleteAssignment(user, task) ? `<label class="submit-check"><input type="checkbox" class="modal-submit-toggle" data-id="${Number(task.assignment_id)}" ${isCompleted(task) ? 'checked' : ''}><span>${user?.is_admin ? '내 제출 완료' : '제출 완료'}</span></label>` : ''}${user && (Number(task.created_by) === Number(user.id) || user.is_admin) ? `<button type="button" class="btn btn-danger btn-sm modal-delete" data-id="${Number(task.assignment_id)}">삭제</button>` : ''}</div></div>`).join('') : '<div class="empty-state">이 날짜에 표시할 과제가 없어요.<br>필터를 확인하거나 새 과제를 등록해보세요.</div><a class="btn btn-primary" href="register.html">새 과제 등록</a>';
   document.getElementById('modal').classList.add('show');
   document.body.classList.add('modal-open');
   if (!keepFocus || !document.getElementById('modal').contains(document.activeElement)) document.querySelector('#modal .modal-content').focus();
@@ -202,17 +222,23 @@ document.getElementById('taskList').addEventListener('change', async (event) => 
   const checkbox = event.target.closest('.modal-submit-toggle');
   if (!checkbox || checkbox.disabled) return;
   const id = Number(checkbox.dataset.id);
+  const task = assignments.find((item) => Number(item.assignment_id) === id);
+  if (!canCompleteAssignment(API.getUser(), task)) {
+    checkbox.checked = false;
+    checkbox.disabled = true;
+    AppUI.toast('소속 반의 학생 계정만 제출 상태를 변경할 수 있습니다.', true);
+    return;
+  }
   const completed = checkbox.checked;
   checkbox.disabled = true;
   try {
     const result = await API.toggleAssignment(id, completed);
     if (!result?.success) throw new Error(result?.error || '제출 상태를 저장하지 못했습니다.');
-    const task = assignments.find((item) => Number(item.assignment_id) === id);
     if (task) task.is_completed = completed ? 1 : 0;
     renderCalendar();
     const item = checkbox.closest('.assignment-item');
     item?.classList.toggle('done', completed);
-    if (item && task) item.querySelector('.meta').textContent = `${task.creator_name || '우리 반'} · ${completed ? '제출 완료' : '미제출'}`;
+    if (item && task) item.querySelector('.meta').textContent = taskMeta(task, API.getUser());
     AppUI.toast(completed ? '제출 완료로 표시했어요.' : '미제출로 변경했어요.');
   } catch (error) {
     checkbox.checked = !completed;

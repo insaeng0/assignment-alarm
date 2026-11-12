@@ -338,78 +338,41 @@ test('protected image loader revokes blobs on removal/pagehide and reloads after
   assert.equal(api.protectedImageStates.size, 0);
 });
 
-test('class approval fails closed for missing/zero flags and administrators bypass only by an explicit admin flag', () => {
+test('registered students enter class pages regardless of legacy approval flags', () => {
   const { api } = createAPI();
-  for (const is_class_approved of [undefined, false, 0, '0']) {
-    const user = api.normalizeUser({ id: 1, is_admin: '0', is_class_approved });
-    assert.equal(api.hasClassAccess(user), false);
-    assert.equal(api.landingPage(user), '/pending.html');
+  for (const is_class_approved of [undefined, false, 0, '0', true]) {
+    const user = api.normalizeUser({ id: 1, is_admin: false, is_class_approved });
+    assert.equal(api.hasClassAccess(user), true);
+    assert.equal(api.landingPage(user), '/calendar.html');
   }
-  assert.equal(api.hasClassAccess(api.normalizeUser({ id: 1, class_approved: 1 })), true);
-  assert.equal(api.hasClassAccess(api.normalizeUser({ id: 2, is_admin: true, is_class_approved: false })), true);
+  assert.equal(api.hasClassAccess(null), false);
+  assert.equal(api.landingPage(null), '/login.html');
 });
 
-test('pending users are routed away from class pages while their tab session remains usable for status checks', async () => {
-  let requests = 0;
-  const { api, window } = createAPI({ config: bearerConfig, pathname: '/assignment/calendar.html', fetch: async () => { requests++; return response({}); } });
+test('legacy unapproved cached identities retain authentication and enter their class', async () => {
+  const { api, window } = createAPI({ config: bearerConfig, pathname: '/assignment/calendar.html', fetch: async () => response({ user_id: 1, grade: 1, class_number: 2, is_class_approved: false, can_complete_assignments: true }) });
   api.setToken(token, expiresAt());
-  api.setUser({ id: 1, grade: 1, class_number: 2, is_class_approved: false });
+  api.setUser({ id: 1, grade: 1, class_number: 2, is_class_approved: false, can_complete_assignments: true });
   api.requireAuth();
-  assert.equal(window.location.href, '/assignment/pending.html');
-  assert.equal(await api.ensureUser(), null);
-  assert.equal(requests, 0, 'cached pending identity must not initialize a class page');
-  window.location.href = '';
-  const user = await api.ensureUser({ allowPending: true });
-  assert.equal(user.is_class_approved, false);
+  assert.equal((await api.ensureUser()).id, 1);
   assert.equal(window.location.href, '');
   assert.equal(api.getToken(), token);
 });
 
-test('me and explicit pending refresh do not loop and receive the latest approval state', async () => {
-  let approved = false;
-  const seen = [];
-  const { api, window } = createAPI({ pathname: '/assignment/pending.html', fetch: async url => { seen.push(url); return response({ user_id: 1, name: '학생', grade: 1, class_number: 2, is_class_approved: approved, is_admin: false }); } });
-  assert.equal((await api.me()).is_class_approved, false);
-  assert.equal(window.location.href, '');
-  assert.equal((await api.ensureUser({ force: true, allowPending: true })).is_class_approved, false);
-  assert.equal(window.location.href, '');
-  approved = true;
-  const refreshed = await api.ensureUser({ force: true, allowPending: true });
-  assert.equal(api.landingPage(refreshed), '/assignment/calendar.html');
-  assert.ok(seen.every(url => url.endsWith('/api/auth/me')));
+test('concurrent class-page callers share identity lookup without an approval gate', async () => {
+  let resolve, calls = 0;
+  const { api, window } = createAPI({ fetch: async () => { calls++; return new Promise(done => { resolve = done; }); } });
+  const first = api.ensureUser({ force: true }), second = api.ensureUser({ force: true });
+  resolve(response({ user_id: 1, grade: 1, class_number: 2, is_class_approved: false, can_complete_assignments: true }));
+  assert.equal((await first).id, 1); assert.equal((await second).id, 1);
+  assert.equal(calls, 1); assert.equal(window.location.href, '');
 });
 
-test('concurrent status and class-page callers independently enforce approval around a shared me request', async () => {
-  let resolve;
-  let calls = 0;
-  const { api, window } = createAPI({ pathname: '/assignment/calendar.html', fetch: async () => { calls++; return await new Promise(done => { resolve = done; }); } });
-  const status = api.ensureUser({ force: true, allowPending: true });
-  const protectedPage = api.ensureUser({ force: true });
-  resolve(response({ user_id: 1, grade: 1, class_number: 2, is_class_approved: false }));
-  assert.equal((await status).is_class_approved, false);
-  assert.equal(await protectedPage, null);
-  assert.equal(calls, 1);
-  assert.equal(window.location.href, '/assignment/pending.html');
-});
-
-test('class approval 403 redirects API and private images without deleting the pending login session', async () => {
-  const denial = { code: 'CLASS_APPROVAL_REQUIRED', error: '반 확인 대기 중' };
-  const { api, window } = createAPI({ config: bearerConfig, pathname: '/assignment/calendar.html', fetch: async () => response(denial, 403) });
-  api.setToken(token, expiresAt());
-  api.setUser({ id: 1, grade: 1, class_number: 2, is_class_approved: true });
-  const denied = await api.getAssignments();
-  assert.equal(denied.code, 'CLASS_APPROVAL_REQUIRED');
-  assert.equal(window.location.href, '/assignment/pending.html');
-  assert.equal(api.getUser().is_class_approved, false);
-  assert.equal(api.getToken(), token);
-  window.location.href = '';
-  await assert.rejects(api.requestImage('/uploads/example.png'));
-  assert.equal(window.location.href, '/assignment/pending.html');
-  assert.equal(api.getToken(), token);
-  const pending = createAPI({ pathname: '/assignment/pending.html', fetch: async () => response(denial, 403) });
-  await pending.api.getAssignments();
-  assert.equal(pending.window.location.href, '', 'pending screen must not redirect to itself');
-  assert.equal(pending.api.safeInternalLink('/pending.html'), '/assignment/pending.html');
+test('ordinary permission failures preserve login and never route to an approval page', async () => {
+  const { api, window } = createAPI({ config: bearerConfig, fetch: async () => response({ error: '권한이 없습니다.' }, 403) });
+  api.setToken(token, expiresAt()); api.setUser({ id: 1, grade: 1, class_number: 1 });
+  assert.equal((await api.getAssignments()).status, 403);
+  assert.equal(api.getToken(), token); assert.equal(window.location.href, '');
 });
 
 function flowDocument() {
@@ -422,17 +385,17 @@ function flowDocument() {
   return { nodes, listeners, document: { documentElement: { classList: { toggle() {} }, dataset: {} }, body: null, getElementById: node, querySelectorAll: () => [], addEventListener() {} } };
 }
 
-test('Google login finalization forwards verified approval flags and chooses the pending or calendar route', async () => {
+test('Google login finalization preserves completion capability and enters the calendar without approval', async () => {
   const ui = flowDocument();
   let me = null;
   const { api, window, context } = createAPI({ pathname: '/assignment/login.html', document: ui.document, fetch: async url => url.endsWith('/api/auth/me') ? response(me || { error: 'not logged in' }, me ? 200 : 401) : response({ authMode: 'cookie', googleClientId: null, error: 'test configuration' }) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/login.js'), 'utf8'), context);
   await new Promise(setImmediate);
-  me = { user_id: 1, name: '학생', grade: 1, class_number: 2, is_class_approved: false, is_admin: false };
+  me = { user_id: 1, name: '학생', grade: 1, class_number: 2, is_class_approved: false, is_admin: true, can_complete_assignments: true };
   context.testUser = me;
   await vm.runInContext('finalizeGoogleLogin(testUser)', context);
-  assert.equal(window.location.replaced, '/assignment/pending.html');
-  assert.equal(api.getUser().is_class_approved, false);
+  assert.equal(window.location.replaced, '/assignment/calendar.html');
+  assert.equal(api.getUser().can_complete_assignments, true);
   me = { ...me, is_class_approved: true };
   context.testUser = me;
   await vm.runInContext('finalizeGoogleLogin(testUser)', context);
@@ -475,68 +438,36 @@ test('an unset Google client is shown as a setup error without a network reconne
   assert.match(ui.nodes.get('authError').textContent, /설정되지/);
 });
 
-test('pending page refresh displays the chosen class then enters the calendar only after server approval', async () => {
-  const ui = flowDocument();
-  let approved = false;
-  const { window, context } = createAPI({ pathname: '/assignment/pending.html', document: ui.document, fetch: async () => response({ user_id: 1, name: '이학생', grade: 2, class_number: 3, is_class_approved: approved }) });
-  context.API = context.window.API;
+test('old approval-page bookmarks redirect directly to the calendar', () => {
+  const { window, context } = createAPI({ pathname: '/assignment/pending.html' });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/pending.js'), 'utf8'), context);
-  await new Promise(setImmediate);
-  assert.equal(ui.nodes.get('pendingName').textContent, '이학생');
-  assert.equal(ui.nodes.get('pendingClass').textContent, '2학년 3반');
-  assert.match(ui.nodes.get('pendingStatus').textContent, /확인 대기/);
-  assert.equal(window.location.href, '');
-  approved = true;
-  await ui.listeners.get('refreshApproval:click')();
-  assert.equal(window.location.replaced, '/assignment/calendar.html');
+  assert.equal(window.location.replaced, 'calendar.html');
+  assert.ok(!fs.readFileSync(path.join(__dirname, '../src/pending.html'), 'utf8').includes('승인'));
 });
 
-test('administrator UI resets approval on a class change and saves only after identity/scope confirmation', async () => {
+test('administrator class edits have no approval checkbox or approval payload', async () => {
   const ui = flowDocument();
   const { api, context } = createAPI({ document: ui.document, windowEvents: new Map() });
-  let admin = true;
-  api.getUser = () => ({ id: 9, is_admin: admin });
-  api.ensureUser = async () => null;
+  let admin = true; api.getUser = () => ({ id: 9, is_admin: admin }); api.ensureUser = async () => null;
   const updates = [];
-  const student = { user_id: 7, name: '김학생', google_email: 'student@bssm.hs.kr', grade: 1, class_number: 2, is_admin: false, is_class_approved: true, created_at: '2026-11-12T00:00:00.000Z' };
+  const student = { user_id: 7, name: '김학생', google_email: 'student@bssm.hs.kr', grade: 1, class_number: 2, is_admin: false, created_at: '2026-11-12T00:00:00.000Z' };
   api.updateAdminUser = async (id, payload) => { updates.push({ id, payload }); return { success: true }; };
   api.getAdminUsers = async () => ({ items: [student], total: 1, page: 1 });
-  const confirmations = [];
-  let accept = false;
-  context.confirm = message => { confirmations.push(message); return accept; };
-  context.API = api;
-  context.AppUI = { toast() {} };
+  context.confirm = () => { throw new Error('Approval confirmation must not be shown'); };
+  context.API = api; context.AppUI = { toast() {} };
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/settings.js'), 'utf8'), context);
   context.testStudent = student;
   vm.runInContext('adminSettingsState.users = [testStudent]; renderAdminUsers();', context);
-  assert.ok(ui.nodes.get('adminUserList').innerHTML.includes('student@bssm.hs.kr'));
-  const grade = { value: '1' };
-  const classNumber = { value: '3', classList: { contains: name => name === 'admin-class-select' } };
-  const approval = { checked: true };
-  const note = { textContent: '' };
-  const fields = { '.admin-grade-select': grade, '.admin-class-select': classNumber, '.admin-class-approval': approval, '.approval-note': note };
+  const html = ui.nodes.get('adminUserList').innerHTML;
+  assert.ok(html.includes('student@bssm.hs.kr')); assert.ok(!html.includes('승인')); assert.ok(!html.includes('admin-class-approval'));
+  const fields = { '.admin-grade-select': { value: '1' }, '.admin-class-select': { value: '3' } };
   const item = { dataset: { id: '7' }, querySelector: selector => fields[selector] };
-  classNumber.closest = () => item;
-  ui.listeners.get('adminUserList:change')({ target: classNumber });
-  assert.equal(approval.checked, false);
-  assert.match(note.textContent, /다시 승인/);
-  approval.checked = true;
   const button = { disabled: false, closest: () => item, classList: { contains: name => name === 'save-admin-user' } };
   await ui.listeners.get('adminUserList:click')({ target: button });
-  assert.equal(updates.length, 0, 'cancelled approval must not save');
-  assert.match(confirmations[0], /김학생/);
-  assert.match(confirmations[0], /student@bssm.hs.kr/);
-  assert.match(confirmations[0], /1학년 3반/);
-  accept = true;
-  await ui.listeners.get('adminUserList:click')({ target: button });
-  assert.equal(updates.length, 1);
-  assert.equal(updates[0].id, 7);
-  assert.equal(updates[0].payload.grade, 1);
-  assert.equal(updates[0].payload.class_number, 3);
-  assert.equal(updates[0].payload.class_approved, true);
-  admin = false;
-  await ui.listeners.get('adminUserList:click')({ target: button });
-  assert.equal(updates.length, 1, 'non-admin state must not issue an admin approval request');
+  assert.equal(updates.length, 1); assert.equal(updates[0].id, 7);
+  assert.deepEqual(JSON.parse(JSON.stringify(updates[0].payload)), { grade: 1, class_number: 3 });
+  admin = false; await ui.listeners.get('adminUserList:click')({ target: button });
+  assert.equal(updates.length, 1, 'ordinary students cannot edit other users');
 });
 
 function rememberedStorage() {

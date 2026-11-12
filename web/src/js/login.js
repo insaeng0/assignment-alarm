@@ -43,7 +43,7 @@ async function finalizeGoogleLogin(user) {
         class_number: sessionUser.class_number,
         profile_image_url: sessionUser.profile_image_url,
         is_alarm_enabled: sessionUser.is_alarm_enabled,
-        is_class_approved: sessionUser.is_class_approved,
+        can_complete_assignments: sessionUser.can_complete_assignments,
         is_admin: sessionUser.is_admin
       });
       window.location.replace(API.landingPage(sessionUser));
@@ -216,7 +216,7 @@ document.getElementById('googleProfileForm').addEventListener('submit', async (e
 
     API.me().then(data => {
       if (data && data.user_id) {
-        API.setUser({ id: data.user_id, name: data.name, grade: data.grade, class_number: data.class_number, profile_image_url: data.profile_image_url, is_alarm_enabled: data.is_alarm_enabled, is_class_approved: data.is_class_approved, is_admin: data.is_admin });
+        API.setUser({ id: data.user_id, name: data.name, grade: data.grade, class_number: data.class_number, profile_image_url: data.profile_image_url, is_alarm_enabled: data.is_alarm_enabled, can_complete_assignments: data.can_complete_assignments, is_admin: data.is_admin });
         window.location.href = API.landingPage(data);
       }
     }).catch(() => {});

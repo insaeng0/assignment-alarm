@@ -43,7 +43,7 @@ try {
   const admins = String(options['--admin-email'] || existing.ADMIN_GOOGLE_EMAILS || process.env.ADMIN_GOOGLE_EMAILS || '')
     .split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
   if (!admins.length || admins.some(email => !/^[a-z0-9._%+-]+@bssm\.hs\.kr$/.test(email))) {
-    throw new Error('반 소속을 승인할 운영자 학교 이메일이 필요합니다. --admin-email 이름@bssm.hs.kr 을 지정하세요. 최초 가입자를 자동으로 관리자로 지정하지 않습니다.');
+    throw new Error('과제·사용자를 관리할 운영자 학교 이메일이 필요합니다. --admin-email 이름@bssm.hs.kr 을 지정하세요. 최초 가입자를 자동으로 관리자로 지정하지 않습니다.');
   }
   const teacherAdmins = options['--teacher-admins'] || existing.ALLOW_TEACHER_NUMBER_ADMINS || 'false';
   if (!['true', 'false'].includes(teacherAdmins)) throw new Error('--teacher-admins에는 true 또는 false만 지정하세요.');

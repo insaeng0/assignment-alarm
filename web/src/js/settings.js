@@ -72,7 +72,7 @@ API.initTheme();
       if (!data || data.error) return;
 
       document.getElementById('settingName').value = data.name;
-      document.getElementById('settingClass').value = data.is_admin ? '관리자 · 전체 학년/반 조회 가능' : `${data.grade}학년 ${data.class_number}반`;
+      document.getElementById('settingClass').value = data.is_admin ? (data.can_complete_assignments ? `${data.grade}학년 ${data.class_number}반 · 학생 관리자` : '관리자 · 전체 학년/반 조회 가능') : `${data.grade}학년 ${data.class_number}반`;
 
       const avatar = document.getElementById('profileAvatar');
       avatar.textContent = '';
@@ -372,12 +372,11 @@ API.initTheme();
 
       container.innerHTML = users.map(user => {
         const admin = API.normalizeFlag(user.is_admin);
-        const approved = API.normalizeFlag(user.is_class_approved ?? user.class_approved);
         return `
         <div class="admin-user-item" data-id="${Number(user.user_id)}">
           <div class="admin-user-top">
             <strong>${API.escapeHTML(user.name)}</strong>
-            <span class="admin-role-badge ${admin ? 'admin' : 'student'}">${admin ? '관리자' : approved ? '소속 확인 완료' : '승인 대기'}</span>
+            <span class="admin-role-badge ${admin ? 'admin' : 'student'}">${admin ? (API.normalizeFlag(user.can_complete_assignments) ? '학생 관리자' : '관리자') : '학생'}</span>
           </div>
           <div class="admin-user-meta">학교 계정 · ${API.escapeHTML(user.google_email || '미등록')}</div>
           <div class="admin-user-grid">
@@ -394,7 +393,6 @@ API.initTheme();
               <select aria-label="사용자 반" class="admin-class-select">${adminUserOptions(4, '반', user.class_number)}</select>
             </div>
           </div>
-          ${admin ? '' : `<div class="toggle-row"><label class="submit-check"><input type="checkbox" class="admin-class-approval" aria-label="${API.escapeHTML(user.name)} 반 소속 승인" ${approved ? 'checked' : ''}><span>반 소속 승인</span></label><span class="settings-help-text approval-note">학교 계정과 실제 소속을 확인한 뒤 승인하세요.</span></div>`}
           <div class="admin-user-meta">생성일 ${new Date(user.created_at).toLocaleString('ko-KR')}</div>
           <div class="admin-user-actions">
             <button class="btn btn-primary btn-sm save-admin-user">저장</button>
@@ -487,11 +485,6 @@ API.initTheme();
             grade: parseInt(item.querySelector('.admin-grade-select').value, 10),
             class_number: parseInt(item.querySelector('.admin-class-select').value, 10)
           };
-          const approval = item.querySelector('.admin-class-approval');
-          if (approval) payload.class_approved = approval.checked;
-          if (payload.class_approved) {
-            if (!confirm(`이 계정의 실제 반 소속을 확인했나요?\n이름: ${current.name}\n학교 계정: ${current.google_email || '미등록'}\n승인할 소속: ${payload.grade}학년 ${payload.class_number}반`)) return;
-          }
           button.disabled = true;
           try {
             const res = await API.updateAdminUser(userId, payload);
@@ -512,16 +505,6 @@ API.initTheme();
         }
         await loadAdminUsers();
       }
-    });
-
-    document.getElementById('adminUserList').addEventListener('change', (event) => {
-      if (!event.target.classList.contains('admin-grade-select') && !event.target.classList.contains('admin-class-select')) return;
-      const item = event.target.closest('.admin-user-item');
-      const approval = item?.querySelector('.admin-class-approval');
-      if (!approval) return;
-      approval.checked = false;
-      const note = item.querySelector('.approval-note');
-      if (note) note.textContent = '소속을 변경했어요. 새 학년과 반을 확인한 뒤 다시 승인하세요.';
     });
 
     document.getElementById('adminAssignmentList').addEventListener('click', async (e) => {

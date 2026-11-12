@@ -196,11 +196,12 @@ test('Pages registration returns a session and issued credentials are invalid af
       const data = await response.json();
       token = data.accessToken;
       assert.ok(token);
-      assert.equal(data.user.is_class_approved, false);
+      assert.equal(data.user.is_class_approved, true);
+      assert.equal(data.user.can_complete_assignments, true);
       assert.equal((await fetch(`${base}/api/auth/me`, options({ token }))).status, 200);
       const protectedResponse = await fetch(`${base}/api/assignments`, options({ token }));
-      assert.equal(protectedResponse.status, 403);
-      assert.equal((await protectedResponse.json()).code, 'CLASS_APPROVAL_REQUIRED');
+      assert.equal(protectedResponse.status, 200);
+      assert.notEqual((await protectedResponse.json()).code, 'CLASS_APPROVAL_REQUIRED');
     });
   } finally { existing = true; }
   await serve(loadApp({ PAGES_AUTH_MODE: 'bearer' }), async base => {

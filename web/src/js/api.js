@@ -242,26 +242,10 @@ const API = {
   appPageUrl(page) {
     return this.frontendBasePath() + page;
   },
-  hasClassAccess(user = this.getUser()) {
-    return Boolean(user && (this.normalizeFlag(user.is_admin) || this.normalizeFlag(user.is_class_approved)));
-  },
-  isPendingPage() {
-    return window.location.pathname.endsWith('/pending.html');
-  },
-  landingPage(user) {
-    return this.appPageUrl(this.hasClassAccess(user) ? 'calendar.html' : 'pending.html');
-  },
-  handleClassApprovalRequired() {
-    const user = this.getUser();
-    if (user) this.setUser({ ...user, is_class_approved: false });
-    this.clearNotificationCache();
-    if (!this.isPendingPage()) window.location.href = this.appPageUrl('pending.html');
-  },
-  allowClassUser(user, { allowPending = false } = {}) {
-    if (allowPending || this.hasClassAccess(user)) return user;
-    if (!this.isPendingPage()) window.location.href = this.appPageUrl('pending.html');
-    return null;
-  },
+  // Legacy approval flags no longer gate a registered user's class pages.
+  hasClassAccess(user = this.getUser()) { return Boolean(user && (user.id || user.user_id)); },
+  landingPage(user) { return this.appPageUrl(this.hasClassAccess(user) ? 'calendar.html' : 'login.html'); },
+  allowClassUser(user) { return user; },
   resolveContentUrl(value) {
     const raw = String(value || '').trim();
     if (/^\/?uploads\//.test(raw)) return new URL('/' + raw.replace(/^\//, ''), this.getApiOrigin() + '/');
@@ -282,6 +266,10 @@ const API = {
       this.storageSet('assignment-api-origin', origin);
       if (realm) this.storageSet('assignment-auth-realm', realm);
       this.storageRemove('token');
+      if (this.storageGet('assignment-capabilities-version') !== '1') {
+        this.storageRemove(this.currentUserFetchedAtKey);
+        this.storageSet('assignment-capabilities-version', '1');
+      }
     } catch { /* request() presents a readable error for invalid configuration. */ }
   },
   storageGet(key) {
@@ -531,7 +519,7 @@ const API = {
       if (response.status === 403) {
         let problem;
         try { problem = await response.json(); } catch {}
-        if (problem?.code === 'CLASS_APPROVAL_REQUIRED') this.handleClassApprovalRequired();
+
       }
       if (!response.ok) throw new Error('첨부 이미지를 불러오지 못했습니다.');
       const image = await response.blob();
@@ -696,7 +684,7 @@ const API = {
         return { success: false, status: res.status, error: '서버가 응답하지 않습니다. 잠시 후 다시 시도해주세요.' };
       }
       if (!res.ok) {
-        if (res.status === 403 && data?.code === 'CLASS_APPROVAL_REQUIRED') this.handleClassApprovalRequired();
+
         return { success: false, status: res.status, code: data?.code, error: data?.error || '요청을 처리하지 못했습니다. 다시 시도해주세요.' };
       }
       if (bearer && isAuthRequest && data?.user) {
@@ -802,7 +790,8 @@ const API = {
       class_number: u.class_number,
       profile_image_url: this.isSafeImageUrl(u.profile_image_url) ? this.resolveContentUrl(u.profile_image_url).toString() : null,
       is_alarm_enabled: this.normalizeFlag(u.is_alarm_enabled),
-      is_class_approved: this.normalizeFlag(u.is_class_approved ?? u.class_approved),
+      is_class_approved: true,
+      can_complete_assignments: this.normalizeFlag(u.can_complete_assignments),
       is_admin: this.normalizeFlag(u.is_admin)
     };
   },

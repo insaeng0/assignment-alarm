@@ -6,6 +6,7 @@ on:
     paths:
       - web/src/**
       - web/test/api.test.js
+      - web/test/calendar.test.js
       - web/test/pages.test.js
       - scripts/build-pages.mjs
       - .github/workflows/pages.yml
@@ -38,7 +39,7 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - name: Check frontend URL and session behavior
-        run: node --test web/test/api.test.js web/test/pages.test.js
+        run: node --test web/test/api.test.js web/test/calendar.test.js web/test/pages.test.js
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Build public frontend only

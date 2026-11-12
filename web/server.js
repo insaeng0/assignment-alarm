@@ -748,8 +748,19 @@ function isAdminUser(user) {
   return normalizeBooleanFlag(user?.is_admin) === 1;
 }
 
+function canCompleteAssignments(user) {
+  const email = String(user?.google_email || '').trim().toLowerCase();
+  if (/^teacher[0-9]+@bssm\.hs\.kr$/.test(email)) return false;
+  if (!isAdminUser(user)) return true;
+  // Administrative access alone is not evidence that the person is a student.
+  return Boolean(user?.google_sub) && /^[0-9]{2}_[0-9]+@bssm\.hs\.kr$/.test(email);
+}
+
 function withClassApproval(user) {
-  return { ...user, is_class_approved: normalizeBooleanFlag(user?.class_approved) === 1 };
+  const { google_sub, ...publicUser } = user || {};
+  // Compatibility for older clients. Class approval no longer gates access;
+  // keep the stored legacy column untouched rather than deleting user data.
+  return { ...publicUser, is_class_approved: true, can_complete_assignments: canCompleteAssignments(user) };
 }
 
 function isValidDateOnly(value) {
@@ -1067,13 +1078,10 @@ async function authMiddleware(req, res, next) {
       const [families] = await pool.execute('SELECT family_id FROM auth_refresh_families WHERE family_id = ? AND user_id = ? AND auth_realm_id = ? AND revoked = 0 AND expires_at_ms > ?', [familyId, decoded.id, AUTH_REALM_ID, Date.now()]);
       if (!families.length) { pagesAccessSessions.delete(decoded.jti); return res.status(401).json({ error: '로그인이 해제되었습니다.' }); }
     }
-    req.currentUser = await getCurrentUser(decoded.id, { includePending: true });
+    req.currentUser = await getCurrentUser(decoded.id);
     if (!req.currentUser) {
       res.setHeader('Set-Cookie', clearAuthCookie());
       return res.status(401).json({ error: '로그인이 만료되었습니다. 다시 로그인해주세요.' });
-    }
-    if (!isAdminUser(req.currentUser) && !req.currentUser.is_class_approved && req.path !== '/api/auth/me') {
-      return res.status(403).json({ code: 'CLASS_APPROVAL_REQUIRED', error: '관리자가 학년과 반을 확인한 뒤 이용할 수 있습니다.' });
     }
     req.user = decoded;
     next();
@@ -1083,13 +1091,25 @@ async function authMiddleware(req, res, next) {
   }
 }
 
-async function getCurrentUser(userId, { includePending = false } = {}) {
-  const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [userId]);
+async function getCurrentUser(userId) {
+  const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [userId]);
   if (!rows[0]) return null;
-  const user = withClassApproval(rows[0]);
-  // A route may re-read a profile after the central authorization check. Never
-  // let a concurrent unapproved class transfer introduce a new readable scope.
-  return includePending || isAdminUser(user) || user.is_class_approved ? user : null;
+  return { ...rows[0], is_class_approved: true, can_complete_assignments: canCompleteAssignments(rows[0]) };
+}
+
+async function getAdminCalendarAssignments(user) {
+  // Admins may view every class. Only their own class can contribute their
+  // personal completion state; another student's rows are never joined.
+  const [rows] = await pool.execute(
+    `SELECT a.*, COALESCE(u.name, '삭제된 사용자') AS creator_name, COALESCE(ua.is_completed, 0) AS is_completed
+     FROM assignments a
+     LEFT JOIN users u ON a.created_by = u.user_id
+     LEFT JOIN user_assignments ua ON ua.assignment_id = a.assignment_id AND ua.user_id = ?
+       AND a.target_grade = ? AND (a.target_class = ? OR a.target_class IS NULL)
+     ORDER BY a.due_date ASC, a.target_grade ASC, a.target_class ASC, a.created_at DESC`,
+    [user.user_id, user.grade, user.class_number]
+  );
+  return rows;
 }
 
 async function ensureAdminAccess(req, res) {
@@ -1231,8 +1251,8 @@ async function migrateSchema(conn) {
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'class_approved'`
   );
   if (classApprovalColumns.length === 0) {
-    // A selected class is not verified membership. Existing students remain
-    // pending until an administrator checks the school identity and class.
+    // Preserve the legacy column for schema compatibility. It is no longer
+    // consulted for authentication, class access, or profile changes.
     await conn.execute('ALTER TABLE users ADD COLUMN class_approved TINYINT(1) NOT NULL DEFAULT 0 AFTER class_number');
   }
 
@@ -1436,7 +1456,8 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
           name: existingUser.name,
           grade: existingUser.grade,
           class_number: existingUser.class_number,
-          is_class_approved: normalizeBooleanFlag(existingUser.class_approved) === 1,
+          is_class_approved: true,
+          can_complete_assignments: canCompleteAssignments({ ...existingUser, is_admin: shouldGrantAdmin ? 1 : 0, google_sub: profile.google_sub, google_email: profile.google_email }),
           profile_image_url: profile.profile_image_url || existingUser.profile_image_url,
           is_alarm_enabled: existingUser.is_alarm_enabled,
           is_admin: shouldGrantAdmin ? 1 : 0
@@ -1512,7 +1533,8 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
           name: existingUser.name,
           grade: existingUser.grade,
           class_number: existingUser.class_number,
-          is_class_approved: normalizeBooleanFlag(existingUser.class_approved) === 1,
+          is_class_approved: true,
+          can_complete_assignments: canCompleteAssignments({ ...existingUser, is_admin: shouldGrantAdmin ? 1 : 0, google_sub: decoded.profile.google_sub, google_email: decoded.profile.google_email }),
           profile_image_url: existingUser.profile_image_url,
           is_alarm_enabled: existingUser.is_alarm_enabled,
           is_admin: shouldGrantAdmin ? 1 : 0
@@ -1548,7 +1570,8 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
         name: uniqueName,
         grade,
         class_number,
-        is_class_approved: false,
+        is_class_approved: true,
+        can_complete_assignments: canCompleteAssignments({ ...user, google_sub: decoded.profile.google_sub, google_email: decoded.profile.google_email }),
         profile_image_url: decoded.profile.profile_image_url,
         is_alarm_enabled: 1,
         is_admin: isAdmin
@@ -1579,10 +1602,10 @@ app.post('/api/auth/refresh', refreshRequestRateLimit, async (req, res) => {
   try {
     jti = reservePagesAccess();
     const session = await refreshSessions.rotate(req.body.refreshToken, req.body.requestId);
-    const user = await getCurrentUser(session.userId, { includePending: true });
+    const user = await getCurrentUser(session.userId);
     if (!user) { await refreshSessions.revoke(session.refreshToken); throw Object.assign(new Error('invalid-user'), { status: 401 }); }
     const access = issuePagesAccess(jti, session.userId, session.familyId);
-    return res.json({ ...access, refreshToken: session.refreshToken, refreshExpiresAt: session.refreshExpiresAt, authRealm: AUTH_REALM_ID, user });
+    return res.json({ ...access, refreshToken: session.refreshToken, refreshExpiresAt: session.refreshExpiresAt, authRealm: AUTH_REALM_ID, user: withClassApproval(user) });
   } catch (error) {
     if (jti) pagesAccessSessions.delete(jti);
     const status = [400, 401, 409, 429, 503].includes(error.status) ? error.status : 503;
@@ -1654,7 +1677,7 @@ app.post('/api/uploads/assignment-image', authMiddleware, assignmentImageRateLim
 
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [req.user.id]);
+    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [req.user.id]);
     if (rows.length === 0) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     res.json(withClassApproval(rows[0]));
   } catch {
@@ -1669,7 +1692,7 @@ app.get('/api/users/:id', authMiddleware, async (req, res) => {
     if (!currentUser) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     const requestedUserId = parseInteger(req.params.id);
     if (requestedUserId !== req.user.id && !isAdminUser(currentUser)) return res.status(403).json({ error: '권한이 없습니다.' });
-    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [req.params.id]);
+    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     res.json(withClassApproval(rows[0]));
   } catch {
@@ -1691,7 +1714,7 @@ app.get('/api/admin/users', authMiddleware, async (req, res) => {
     }
     const [[countRow]] = await pool.execute('SELECT COUNT(*) AS total FROM users');
     const [rows] = await pool.execute(
-      `SELECT user_id, name, google_email, grade, class_number, class_approved, is_alarm_enabled, is_admin, created_at
+      `SELECT user_id, name, google_sub, google_email, grade, class_number, class_approved, is_alarm_enabled, is_admin, created_at
          FROM users
         ORDER BY is_admin DESC, grade ASC, class_number ASC, name ASC
         LIMIT ${safePageSize} OFFSET ${safeOffset}`
@@ -1857,9 +1880,9 @@ app.put('/api/admin/users/:id', authMiddleware, async (req, res) => {
       if (!value || value < 1 || value > maximum) return res.status(400).json({ error: '학년 또는 반 값이 올바르지 않습니다.' });
       changes[field] = value;
     }
-    for (const field of ['is_alarm_enabled', 'class_approved']) {
+    for (const field of ['is_alarm_enabled']) {
       if (req.body[field] === undefined) continue;
-      if (![true, false, 0, 1, '0', '1'].includes(req.body[field])) return res.status(400).json({ error: '알림 또는 소속 승인 값이 올바르지 않습니다.' });
+      if (![true, false, 0, 1, '0', '1'].includes(req.body[field])) return res.status(400).json({ error: '알림 값이 올바르지 않습니다.' });
       changes[field] = normalizeBooleanFlag(req.body[field]);
     }
     if (!Object.keys(changes).length) return res.status(400).json({ error: '수정할 내용이 없습니다.' });
@@ -1867,23 +1890,18 @@ app.put('/api/admin/users/:id', authMiddleware, async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
     const [targetRows] = await connection.execute(
-      'SELECT user_id, grade, class_number, class_approved FROM users WHERE user_id = ? FOR UPDATE', [targetUserId]
+      'SELECT user_id, grade, class_number, google_sub, google_email, is_admin FROM users WHERE user_id = ? FOR UPDATE', [targetUserId]
     );
     if (!targetRows.length) {
       await connection.rollback();
       return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     }
     const target = targetRows[0];
-    const scopeChanged = (changes.grade !== undefined && changes.grade !== Number(target.grade))
-      || (changes.class_number !== undefined && changes.class_number !== Number(target.class_number));
-    // Approval belongs to the verified class. A transfer needs a fresh explicit
-    // administrator approval, including when concurrent admin edits occur.
-    if (scopeChanged && changes.class_approved === undefined) changes.class_approved = 0;
     const fields = Object.keys(changes);
     await connection.execute(`UPDATE users SET ${fields.map(field => `${field} = ?`).join(', ')} WHERE user_id = ?`, [...fields.map(field => changes[field]), targetUserId]);
     await connection.commit();
     clearResponseCaches({ users: true, notifications: true });
-    return res.json({ success: true, is_class_approved: normalizeBooleanFlag(changes.class_approved ?? target.class_approved) === 1 });
+    return res.json({ success: true, is_class_approved: true, can_complete_assignments: canCompleteAssignments(target) });
   } catch (error) {
     if (connection) { try { await connection.rollback(); } catch {} }
     logApiError('PUT /api/admin/users/:id failed', error, { targetUserId: req.params.id, actorUserId: req.user?.id });
@@ -1937,8 +1955,8 @@ app.put('/api/admin/users/:id', authMiddleware, async (req, res) => {
       if (req.body.name !== undefined) {
         return res.status(400).json({ error: '이름은 변경할 수 없습니다.' });
       }
-      if (['grade', 'class_number', 'class_approved', 'is_class_approved', 'is_admin'].some(field => req.body[field] !== undefined)) {
-        return res.status(403).json({ error: '소속과 승인 상태는 관리자만 변경할 수 있습니다.' });
+      if (['grade', 'class_number', 'is_admin', 'can_complete_assignments', 'google_sub', 'google_email'].some(field => req.body[field] !== undefined)) {
+        return res.status(403).json({ error: '소속과 계정 권한은 관리자만 변경할 수 있습니다.' });
       }
       if (req.body.is_alarm_enabled !== undefined) {
         if (![true, false, 0, 1, '0', '1'].includes(req.body.is_alarm_enabled)) return res.status(400).json({ error: '알림 설정이 올바르지 않습니다.' });
@@ -1956,7 +1974,8 @@ app.put('/api/admin/users/:id', authMiddleware, async (req, res) => {
     if (updates.length === 0) return res.status(400).json({ error: '수정할 내용이 없습니다.' });
     values.push(req.params.id);
     await pool.execute(`UPDATE users SET ${updates.join(', ')} WHERE user_id = ?`, values);
-    res.json({ success: true });
+    clearResponseCaches({ users: true, notifications: true });
+    res.json({ success: true, is_class_approved: true, can_complete_assignments: canCompleteAssignments(req.currentUser) });
   } catch {
     res.status(500).json({ error: '서버 오류가 발생했습니다.' });
   }
@@ -1968,10 +1987,7 @@ app.get('/api/assignments', authMiddleware, async (req, res) => {
     const user = await getCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     if (isAdminUser(user)) {
-      const [rows] = await pool.execute(
-          'SELECT a.*, COALESCE(u.name, \'삭제된 사용자\') AS creator_name FROM assignments a LEFT JOIN users u ON a.created_by = u.user_id ORDER BY a.due_date ASC, a.target_grade ASC, a.target_class ASC, a.created_at DESC'
-        );
-        return res.json(rows);
+        return res.json(await getAdminCalendarAssignments(user));
       }
       const [rows] = await pool.execute(
         'SELECT a.*, COALESCE(u.name, \'삭제된 사용자\') AS creator_name FROM assignments a LEFT JOIN users u ON a.created_by = u.user_id WHERE a.target_grade = ? AND (a.target_class = ? OR a.target_class IS NULL) ORDER BY a.due_date ASC',
@@ -2124,17 +2140,17 @@ app.get('/api/assignments/:id/status', authMiddleware, async (req, res) => {
     if (assignmentRows.length === 0) return res.status(404).json({ error: '과제를 찾을 수 없습니다.' });
 
     const assignment = assignmentRows[0];
-    const [students] = await pool.execute(
-      `SELECT u.user_id, u.name, u.grade, u.class_number, COALESCE(ua.is_completed, 0) AS is_completed
+    const [classMembers] = await pool.execute(
+      `SELECT u.user_id, u.name, u.grade, u.class_number, u.is_admin, u.google_sub, u.google_email, COALESCE(ua.is_completed, 0) AS is_completed
        FROM users u
        LEFT JOIN user_assignments ua
          ON ua.user_id = u.user_id AND ua.assignment_id = ?
-       WHERE u.is_admin = 0
-         AND u.grade = ?
+       WHERE u.grade = ?
          AND (? IS NULL OR u.class_number = ?)
        ORDER BY u.class_number ASC, u.name ASC`,
       [assignmentId, assignment.target_grade, assignment.target_class, assignment.target_class]
     );
+    const students = classMembers.filter(canCompleteAssignments).map(({ user_id, name, grade, class_number, is_completed }) => ({ user_id, name, grade, class_number, is_completed }));
 
     res.json({
       assignment,
@@ -2180,7 +2196,7 @@ app.put('/api/user-assignments', authMiddleware, async (req, res) => {
     if (!assignmentId) return res.status(400).json({ error: '과제 정보가 올바르지 않습니다.' });
     const user = await getCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
-    if (isAdminUser(user)) return res.status(403).json({ error: '관리자 계정은 완료 처리를 할 수 없습니다.' });
+    if (!canCompleteAssignments(user)) return res.status(403).json({ error: '학생 계정만 본인 반 과제를 완료 처리할 수 있습니다.' });
     if (![true, false, 0, 1, '0', '1'].includes(req.body.is_completed)) {
       return res.status(400).json({ error: '완료 상태가 올바르지 않습니다.' });
     }
@@ -2215,10 +2231,7 @@ app.get('/api/users/:userId/assignments', authMiddleware, async (req, res) => {
     const user = await getCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     if (isAdminUser(user)) {
-      const [rows] = await pool.execute(
-          'SELECT a.*, COALESCE(u.name, \'삭제된 사용자\') AS creator_name, 0 AS is_completed FROM assignments a LEFT JOIN users u ON a.created_by = u.user_id ORDER BY a.due_date ASC, a.target_grade ASC, a.target_class ASC, a.created_at DESC'
-        );
-        return res.json(rows);
+        return res.json(await getAdminCalendarAssignments(user));
       }
       const [rows] = await pool.execute(
         'SELECT a.*, COALESCE(u.name, \'삭제된 사용자\') AS creator_name, COALESCE(ua.is_completed, 0) AS is_completed FROM assignments a LEFT JOIN users u ON a.created_by = u.user_id LEFT JOIN user_assignments ua ON a.assignment_id = ua.assignment_id AND ua.user_id = ? WHERE a.target_grade = ? AND (a.target_class = ? OR a.target_class IS NULL) ORDER BY a.due_date ASC',
