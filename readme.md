@@ -11,10 +11,10 @@
 
 ## GitHub Pages + Raspberry Pi 4
 
-[설치·운영 안내](docs/RASPBERRY_PI.md)를 참고하세요. 현재 소스에 운영 비밀키나 데이터는 들어 있지 않습니다. 이전 맥북 구성은 [별도 문서](docs/GITHUB_PAGES_MAC.md)에 보관했습니다.
+[설치·운영 안내](docs/RASPBERRY_PI.md)를 참고하세요. 현재 소스에 운영 비밀키나 데이터는 들어 있지 않습니다. 이전 맥북 구성은 [과거 운영 기록](docs/GITHUB_PAGES_MAC.md)으로 보관하며 현재 Pi 운영에는 사용하지 않습니다.
 
 - Pages 빌드는 `web/src`의 허용된 프런트 파일만 배포합니다.
-- 라즈베리파이의 Express/MySQL/첨부파일은 고정 고정 Cloudflare Tunnel과 Workers VPC HTTPS 주소 뒤에서 실행합니다.
+- 라즈베리파이의 Express/MySQL/첨부파일은 고정 Cloudflare Tunnel과 Workers VPC HTTPS 주소 뒤에서 실행합니다.
 - 도메인이 없는 `github.io` 구성에는 타사 쿠키에 의존하지 않는 단기 Bearer 인증과 자동 갱신 세션을 사용합니다.
 - 같은 출처의 기존 Express 배포는 기본 쿠키 방식으로 유지됩니다.
 
@@ -39,10 +39,10 @@ npm test
 npm run check
 npm audit --omit=dev
 cd ..
-node --test scripts/configure-mac.test.mjs
+node --test deploy/worker.test.mjs scripts/configure-mac.test.mjs scripts/run-mac-tunnel.test.mjs
 ```
 
-자동 테스트는 임시 HTTP 서버와 DB·Google 대역을 사용합니다. 실제 학교 Google 로그인, 운영 DB 이전, 외부 HTTPS 가동 상태는 실제 계정과 서버에서 별도로 확인해야 합니다. 보안 점검이나 취약점 검사 0건이 미발견 취약점까지 없음을 보증하지는 않습니다.
+자동 테스트는 임시 HTTP 서버와 DB·Google 대역을 사용합니다. 2026-11-13에는 Pi의 웹·MySQL 상태, 고정 Worker API의 health 응답, 터널 자동 재연결을 확인했습니다. 웹 컨테이너와 터널 서비스를 재시작한 뒤 실제 브라우저에서 수동 Google 재인증 없이 로그인과 달력 건수 표시가 복구됐습니다. 전체 자동 테스트 156개도 통과했습니다. Pi 전원 재부팅과 새로운 Google 인증 흐름 전체는 아직 검증하지 않았습니다. [현재 확인 결과와 과거 기록](docs/VALIDATION.md)을 구분해 확인하세요. 취약점 검사 0건이 미발견 취약점까지 없음을 뜻하지는 않습니다.
 
 기존 배포 자료: [라즈베리파이](docs/RASPBERRY_PI.md), [호스팅 참고](docs/FREE_HOSTING.md). 기존 Railway 데이터와 이미지를 옮길 때는 먼저 원본 백업을 보존하세요.
 

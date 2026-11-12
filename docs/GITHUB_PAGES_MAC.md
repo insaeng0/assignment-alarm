@@ -1,6 +1,8 @@
-# GitHub Pages 화면 + 맥북 서버
+# 과거 운영 기록: GitHub Pages 화면 + 맥북 서버
 
-이 소스는 GitHub 기본 주소의 화면과 별도 HTTPS 주소의 맥북 Express/MySQL 서버를 연결합니다. 새 설치에서는 아래 설정을 실제 계정·운영 DB·Google 설정과 연결해야 합니다.
+**2026-11-13부터 현재 운영 서버는 Raspberry Pi 4입니다. [현재 Pi 운영 안내](RASPBERRY_PI.md)를 사용하세요.** 아래 내용은 이전 Mac 구성의 참고 기록입니다. 현재 운영에서 `configure-mac.mjs`나 `run-mac-tunnel.mjs`를 실행하면 중지한 Mac 서버를 다시 사용하거나 Pages의 API 주소를 임시 중계로 되돌릴 수 있습니다. 기존 Mac의 웹·MySQL 컨테이너와 프로젝트 네트워크는 제거했고, 구형 감독·임시 중계 프로세스는 정확한 명령 식별을 확인한 뒤 종료했습니다. 기존 데이터와 백업은 보존합니다.
+
+이전 구성은 GitHub Pages 화면과 별도 HTTPS 주소의 Mac Express/MySQL 서버를 연결했습니다. 아래 절차는 해당 구성을 별도로 재구성할 때만 참고합니다.
 
 ## 구성
 
