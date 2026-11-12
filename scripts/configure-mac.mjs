@@ -63,6 +63,7 @@ try {
     COMPOSE_PROJECT_NAME: 'assignment-alarm-mac', ASSIGNMENT_CONTAINER_PREFIX: 'assignment-mac',
     APP_ORIGIN: apiOrigin, FRONTEND_ORIGIN: frontendOrigin,
     PAGES_AUTH_MODE: 'bearer', COOKIE_SAMESITE: 'lax',
+    TUNNEL_PROVIDER: existing.TUNNEL_PROVIDER || 'auto',
     GOOGLE_CLIENT_ID: clientId,
     ADMIN_GOOGLE_EMAILS: [...new Set(admins)].join(','),
     ALLOW_TEACHER_NUMBER_ADMINS: teacherAdmins,

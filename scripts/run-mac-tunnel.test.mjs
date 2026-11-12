@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { acceptedTunnelOrigin, providerOrigin, validatePrivateEnv, replaceAppOrigin, updateAppOrigin, sshArguments, githubCommands, verifyBackend, FRONTEND_ORIGIN } from './run-mac-tunnel.mjs';
+import { acceptedTunnelOrigin, cloudflareTunnelOrigin, cloudflareArguments, nextProvider, providerOrigin, validatePrivateEnv, replaceAppOrigin, updateAppOrigin, sshArguments, githubCommands, verifyBackend, FRONTEND_ORIGIN } from './run-mac-tunnel.mjs';
 
 const origin = 'https://abcd1234.lhr.life';
 const client = '12345-test.apps.googleusercontent.com';
@@ -62,4 +62,23 @@ test('public validation requires health, exact Pages CORS, bearer mode and the c
     await assert.rejects(verifyBackend(origin, config, { fetcher: async url => ({ ok: true, headers: { get: () => FRONTEND_ORIGIN }, json: async () => url.endsWith('/health') ? { status: 'ok' } : invalidConfig }) }));
   }
   await assert.rejects(verifyBackend(origin, config, { fetcher: async () => ({ ok: true, headers: { get: () => 'https://evil.example' }, json: async () => ({ status: 'ok' }) }) }));
+});
+
+
+test('Cloudflare recovery accepts only a bounded quick-tunnel origin and forwards only loopback', () => {
+  const value = 'https://new-healthy-relay.trycloudflare.com';
+  assert.equal(cloudflareTunnelOrigin(' | ' + value + ' | '), value);
+  assert.equal(providerOrigin(value), value);
+  for (const line of ['https://evil.example', value + '.evil.example', 'https://a.b.trycloudflare.com', 'https://trycloudflare.com', 'http://a.trycloudflare.com']) assert.equal(cloudflareTunnelOrigin(line), null);
+  assert.equal(acceptedTunnelOrigin(event({ id: 'localhost/a.trycloudflare.com' })), null);
+  assert.deepEqual(cloudflareArguments(3100), ['tunnel', '--no-autoupdate', '--url', 'http://127.0.0.1:3100', '--protocol', 'http2', '--edge-ip-version', '4']);
+  assert.throws(() => cloudflareArguments(0));
+});
+test('automatic recovery changes provider only after repeated connection failures; explicit settings remain pinned', () => {
+  assert.equal(nextProvider('cloudflare', 'auto', 1), 'cloudflare');
+  assert.equal(nextProvider('cloudflare', 'auto', 2), 'localhost.run');
+  assert.equal(nextProvider('localhost.run', 'auto', 2), 'cloudflare');
+  assert.equal(nextProvider('cloudflare', 'cloudflare', 9), 'cloudflare');
+  assert.equal(validatePrivateEnv(env).provider, 'auto');
+  assert.throws(() => validatePrivateEnv(env + 'TUNNEL_PROVIDER=untrusted\n'));
 });

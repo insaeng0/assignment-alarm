@@ -17,11 +17,28 @@ export function providerOrigin(value) {
   const raw = String(value || '').trim();
   if (!/^https:\/\/[a-z0-9.-]+\/?$/i.test(raw)) throw invalid('Tunnel origin must be a path-free HTTPS provider URL.');
   const url = new URL(raw);
-  const suffix = ['.lhr.life', '.localhost.run'].find(end => url.hostname.endsWith(end));
+  const suffix = ['.lhr.life', '.localhost.run', '.trycloudflare.com'].find(end => url.hostname.endsWith(end));
   const prefix = suffix && url.hostname.slice(0, -suffix.length);
   if (!prefix || url.hostname.length > 253 || !prefix.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)))
     throw invalid('Unexpected tunnel provider hostname.');
+  if (suffix === '.trycloudflare.com' && prefix.includes('.')) throw invalid('Unexpected Cloudflare quick-tunnel hostname.');
   return url.origin;
+}
+
+export function cloudflareTunnelOrigin(line) {
+  if (typeof line !== 'string' || line.length > 256 * 1024) return null;
+  const found = line.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com(?=[\s|]|$)/i)?.[0];
+  try { return found ? providerOrigin(found) : null; } catch { return null; }
+}
+
+export function cloudflareArguments(hostPort) {
+  if (!Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535) throw invalid('Invalid tunnel port.');
+  return ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${hostPort}`, '--protocol', 'http2', '--edge-ip-version', '4'];
+}
+
+export function nextProvider(provider, configured, failedAttempts) {
+  if (configured !== 'auto' || failedAttempts < 2) return provider;
+  return provider === 'cloudflare' ? 'localhost.run' : 'cloudflare';
 }
 
 export function acceptedTunnelOrigin(line) {
@@ -30,9 +47,12 @@ export function acceptedTunnelOrigin(line) {
   try { event = JSON.parse(line); } catch { return null; }
   if (event?.specversion !== '1.0' || event.type !== 'v1.tcpip_forward.register.accepted' || event.source !== 'ssh://localhost.run/') return null;
   try {
-    if (typeof event.id === 'string' && /^localhost\/[a-z0-9.-]+$/i.test(event.id)) return providerOrigin('https://' + event.id.slice('localhost/'.length));
-    const first = typeof event.data === 'string' && event.data.match(/https:\/\/[^\s<>"']+/i)?.[0];
-    return first ? providerOrigin(first) : null;
+    const raw = typeof event.id === 'string' && /^localhost\/[a-z0-9.-]+$/i.test(event.id)
+      ? 'https://' + event.id.slice('localhost/'.length)
+      : typeof event.data === 'string' ? event.data.match(/https:\/\/[^\s<>"']+/i)?.[0] : null;
+    if (!raw) return null;
+    const safe = providerOrigin(raw);
+    return ['.lhr.life', '.localhost.run'].some(suffix => new URL(safe).hostname.endsWith(suffix)) ? safe : null;
   } catch { return null; }
 }
 
@@ -51,8 +71,10 @@ export function validatePrivateEnv(text) {
   if (!/^[1-9]\d{0,4}$/.test(values.HOST_PORT || '') || Number(values.HOST_PORT) > 65535) throw invalid('HOST_PORT must be an integer from 1 to 65535.');
   if (!/^[\w-]+\.apps\.googleusercontent\.com$/.test(values.GOOGLE_CLIENT_ID || '')) throw invalid('A configured Google web client ID is required.');
   if (!/^[a-f0-9]{64}$/.test(values.AUTH_REALM_ID || '')) throw invalid('A stable AUTH_REALM_ID is required.');
+  const provider = values.TUNNEL_PROVIDER || 'auto';
+  if (!['auto', 'cloudflare', 'localhost.run'].includes(provider)) throw invalid('Invalid tunnel provider.');
   if (!/^APP_ORIGIN=/m.test(text)) throw invalid('APP_ORIGIN is missing.');
-  return { hostPort: Number(values.HOST_PORT), frontendOrigin: values.FRONTEND_ORIGIN, googleClientId: values.GOOGLE_CLIENT_ID, authRealm: values.AUTH_REALM_ID };
+  return { hostPort: Number(values.HOST_PORT), frontendOrigin: values.FRONTEND_ORIGIN, googleClientId: values.GOOGLE_CLIENT_ID, authRealm: values.AUTH_REALM_ID, provider };
 }
 
 export function replaceAppOrigin(text, origin) {
@@ -120,9 +142,11 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
   await fs.chmod(knownHosts, 0o600);
   const aborter = new AbortController();
   let child = null, stopped = false, candidate = null, lastDispatchedOrigin = null, failures = 0, busy = false;
+  let provider = config.provider === 'auto' ? 'cloudflare' : config.provider;
+  let failedAttempts = 0;
   let retryTimer, handshakeTimer, heartbeat;
   const state = async status => {
-    const payload = { provider: 'localhost.run', status, origin: candidate, lastDispatchedOrigin, supervisorPid: process.pid, sshPid: child?.pid || null, updatedAt: new Date().toISOString() };
+    const payload = { provider, status, origin: candidate, lastDispatchedOrigin, supervisorPid: process.pid, tunnelPid: child?.pid || null, sshPid: provider === 'localhost.run' ? child?.pid || null : null, updatedAt: new Date().toISOString() };
     const temp = path.join(runtime, '.tunnel-state-' + randomBytes(6).toString('hex'));
     await fs.writeFile(temp, JSON.stringify(payload, null, 2) + '\n', { mode: 0o600 });
     await fs.rename(temp, path.join(runtime, 'tunnel-state.json'));
@@ -149,6 +173,9 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
   const reconnect = () => {
     if (stopped) return;
     clearTimeout(handshakeTimer); killOwnedChild(); candidate = null; failures = 0;
+    failedAttempts++;
+    const next = nextProvider(provider, config.provider, failedAttempts);
+    if (next !== provider) { provider = next; failedAttempts = 0; log('Switching HTTPS tunnel provider.'); }
     void state('retrying').catch(() => {});
     if (!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; connect(); }, 5000);
   };
@@ -158,10 +185,10 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
     const origin = candidate, owned = child;
     try {
       const latest = validatePrivateEnv(await fs.readFile(envPath, 'utf8'));
-      if (latest.hostPort !== config.hostPort || latest.googleClientId !== config.googleClientId || latest.authRealm !== config.authRealm) throw invalid('Private settings changed; restart the manual supervisor.');
+      if (latest.hostPort !== config.hostPort || latest.googleClientId !== config.googleClientId || latest.authRealm !== config.authRealm || latest.provider !== config.provider) throw invalid('Private settings changed; restart the manual supervisor.');
       await verifyBackend(origin, latest, { signal: aborter.signal });
       if (stopped || candidate !== origin || child !== owned) return;
-      failures = 0;
+      failures = 0; failedAttempts = 0;
       if (lastDispatchedOrigin !== origin) {
         await state('publishing');
         await updateAppOrigin(envPath, origin);
@@ -175,7 +202,7 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
       }
       await state('publish_requested');
     } catch (error) {
-      if (stopped) return;
+      if (stopped || candidate !== origin || child !== owned) return;
       if (error?.code === 'CONFIG_INVALID') { log('Configuration mismatch; tunnel stopped.'); await stop('configuration_error'); return; }
       failures++;
       await state('verification_or_publish_retry').catch(() => {});
@@ -186,26 +213,32 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
   const connect = () => {
     if (stopped) return;
     const environment = { ...process.env }; delete environment.SSH_AUTH_SOCK; delete environment.SSH_AGENT_PID;
-    child = spawn('/usr/bin/ssh', sshArguments(config.hostPort, knownHosts), { cwd: repositoryRoot, shell: false, env: environment, stdio: ['ignore', 'pipe', 'ignore'] });
+    const selectedProvider = provider;
+    const command = selectedProvider === 'cloudflare' ? process.env.CLOUDFLARED_BIN || 'cloudflared' : '/usr/bin/ssh';
+    const args = selectedProvider === 'cloudflare' ? cloudflareArguments(config.hostPort) : sshArguments(config.hostPort, knownHosts);
+    child = spawn(command, args, { cwd: repositoryRoot, shell: false, env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
     const owned = child;
-    let buffer = '';
-    owned.stdout.setEncoding('utf8');
-    owned.stdout.on('data', chunk => {
-      buffer += chunk;
-      if (buffer.length > 256 * 1024) { buffer = ''; return; }
-      let newline;
-      while ((newline = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-        const origin = acceptedTunnelOrigin(line);
-        if (!origin || stopped || child !== owned || origin === candidate) continue;
-        candidate = origin; failures = 0; clearTimeout(handshakeTimer);
-        log('Tunnel candidate: ' + origin);
-        void adopt();
-      }
-    });
-    const ended = () => { if (!stopped && child === owned) { log('SSH disconnected; reconnecting.'); reconnect(); } };
+    const consume = stream => {
+      let buffer = '';
+      stream.setEncoding('utf8');
+      stream.on('data', chunk => {
+        buffer += chunk;
+        if (buffer.length > 256 * 1024) { buffer = ''; return; }
+        let newline;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+          const origin = selectedProvider === 'cloudflare' ? cloudflareTunnelOrigin(line) : acceptedTunnelOrigin(line);
+          if (!origin || stopped || child !== owned || origin === candidate) continue;
+          candidate = origin; failures = 0; clearTimeout(handshakeTimer);
+          log('Tunnel candidate: ' + origin);
+          void adopt();
+        }
+      });
+    };
+    consume(owned.stdout); consume(owned.stderr);
+    const ended = () => { if (!stopped && child === owned) { log('Tunnel process disconnected; reconnecting.'); reconnect(); } };
     owned.on('error', ended); owned.on('exit', ended);
-    handshakeTimer = setTimeout(() => { if (!candidate && child === owned) reconnect(); }, 45_000);
+    handshakeTimer = setTimeout(() => { if (!candidate && child === owned) reconnect(); }, selectedProvider === 'cloudflare' ? 75_000 : 45_000);
     void state('connecting').catch(() => {});
   };
   process.on('SIGINT', onSignal); process.on('SIGTERM', onSignal);

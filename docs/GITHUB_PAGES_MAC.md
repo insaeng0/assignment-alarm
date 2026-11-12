@@ -43,7 +43,7 @@ Cloudflare Quick Tunnel의 발급 또는 연결이 응답하지 않으면 설치
 node scripts/run-mac-tunnel.mjs
 ```
 
-이 프로세스는 실제 API 응답을 검증한 뒤 GitHub Pages의 공개 API 주소를 갱신하고 배포를 요청합니다. 중계가 끊기거나 무료 주소가 바뀌면 다시 연결합니다. GitHub CLI의 저장소/워크플로 권한이 필요합니다. 브라우저의 기존 API 설정과 오류 캐시는 새 주소로 갱신되며, 연결 실패 화면에서 수동 재시도가 가능합니다.
+이 프로세스는 기본으로 Cloudflare Quick Tunnel을 사용하고 반복 연결 실패 시 localhost.run SSH 중계로 전환합니다. 두 방식 모두 실제 API 응답을 검증한 뒤 GitHub Pages의 공개 API 주소를 갱신하고 배포를 요청합니다. 중계가 끊기거나 무료 주소가 바뀌면 다시 연결합니다. `.env.mac`의 `TUNNEL_PROVIDER=auto`가 기본이며 `cloudflare` 또는 `localhost.run`으로 고정할 수도 있습니다. GitHub CLI의 저장소/워크플로 권한이 필요합니다. 브라우저의 기존 API 설정과 오류 캐시는 새 주소로 갱신되며, 연결 실패 화면에서 수동 재시도가 가능합니다.
 
 무료 중계의 주소와 가동률은 보장되지 않습니다. 이 프로세스와 Docker가 실행 중이어야 하며, 고정 주소가 필요한 운영은 정식 터널/고정 도메인 구성이 필요합니다. [localhost.run 공식 안내](https://localhost.run/docs/forever-free)
 
