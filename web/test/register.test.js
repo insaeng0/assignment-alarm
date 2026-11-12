@@ -42,7 +42,8 @@ function setup(options = {}) {
     setCachedData(url, data) { calls.cache.push({ url, data }); }, refreshNotifications: async () => {},
     escapeHTML: escape, renderTextWithLinks: escape
   };
-  const context = vm.createContext({ API, document, window: { scrollTo() {} },
+  const window = { scrollTo() {}, location: { href: '' } };
+  const context = vm.createContext({ API, document, window,
     AppUI: { localDate: () => '2026-11-12', toast: (...args) => calls.toast.push(args) },
     confirm: () => true, alert() {}, Date, JSON, Number, Map, Set, Promise });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/register.js'), 'utf8'), context);
@@ -51,7 +52,7 @@ function setup(options = {}) {
   const submit = () => fire('assignmentForm', 'submit');
   const fill = (title, content = '작성 내용') => { node('taskTitle').value = title; node('taskContent').value = content; node('taskDate').value = '2026-11-21'; };
   const action = (name, id, extra = {}) => fire('myAssignments', 'click', { target: element('', [name], { id: String(id), ...extra }) });
-  return { node, calls, user, context, fire, fill, submit, action, html: () => node('myAssignments').innerHTML };
+  return { node, calls, user, window, context, fire, fill, submit, action, html: () => node('myAssignments').innerHTML };
 }
 
 test('cached assignments render while independent config and fresh list requests are still pending', async () => {
@@ -66,7 +67,7 @@ test('cached assignments render while independent config and fresh list requests
   assert.equal(app.node('insertImageBtn').hidden, true);
 });
 
-test('create appears and clears the form before the response, then replaces the temporary ID on success', async () => {
+test('create stays on the form while pending and redirects only after confirmed data is cached', async () => {
   const save = deferred();
   const app = setup({ create: () => save.promise });
   await flush();
@@ -79,6 +80,7 @@ test('create appears and clears the form before the response, then replaces the 
   assert.equal(app.node('taskTitle').value, '');
   assert.equal(app.node('saveBtn').disabled, false, 'a new draft remains usable during the queued write');
   assert.equal(app.calls.cache.length, 0, 'unconfirmed rows must not enter the private data cache');
+  assert.equal(app.window.location.href, '', 'an optimistic row is not a confirmed registration');
   await app.action('delete-my', 'pending-1');
   assert.equal(app.calls.delete.length, 0);
   save.resolve({ success: true, assignment_id: 42 });
@@ -89,6 +91,7 @@ test('create appears and clears the form before the response, then replaces the 
   assert.equal(app.calls.get, 1, 'saving does not wait for a second list request');
   assert.equal(app.calls.cache.at(-1).data[0].assignment_id, 42);
   assert.equal(app.calls.cache.at(-1).data[0]._saved, undefined);
+  assert.equal(app.window.location.href, 'calendar.html');
 });
 
 test('failed creation rolls back only its pending row and restores an untouched draft', async () => {
@@ -104,6 +107,7 @@ test('failed creation rolls back only its pending row and restores an untouched 
   assert.equal(app.node('taskTitle').value, '실패한 과제');
   assert.equal(app.node('taskContent').value, '보존할 내용');
   assert.equal(app.calls.toast.at(-1)[1], true);
+  assert.equal(app.window.location.href, '', 'failed registration must retain the form');
 });
 
 test('a failed older save never overwrites a newer draft and remains explicitly recoverable', async () => {
@@ -141,6 +145,99 @@ test('edit renders immediately, disables only that pending row, and rolls back w
   assert.ok(app.html().includes('원래 과제'));
   assert.equal(app.node('taskTitle').value, '수정된 제목');
   assert.equal(app.node('saveBtn').textContent, '수정하기');
+});
+
+test('a confirmed edit keeps the registration page and its confirmed cache', async () => {
+  const save = deferred();
+  const app = setup({ edit: () => save.promise });
+  await flush(); await app.action('edit-my', 11);
+  app.fill('수정 저장한 제목');
+  const done = app.submit();
+  assert.equal(app.window.location.href, '');
+  save.resolve({ success: true });
+  await done;
+  assert.equal(app.calls.edit.length, 1);
+  assert.equal(app.calls.create.length, 0);
+  assert.equal(app.calls.cache.at(-1).data[0].title, '수정 저장한 제목');
+  assert.equal(app.window.location.href, '', 'only a newly created assignment returns to the dashboard');
+});
+
+test('a create response without a valid saved ID preserves the draft and never navigates', async () => {
+  const app = setup({ create: async () => ({ success: true }) });
+  await flush(); app.fill('확인하지 못한 과제', '보존할 원문');
+  await app.submit();
+  assert.equal(app.window.location.href, '');
+  assert.equal(app.node('taskTitle').value, '확인하지 못한 과제');
+  assert.equal(app.node('taskContent').value, '보존할 원문');
+  assert.equal(app.calls.cache.length, 0);
+  assert.equal(app.calls.toast.at(-1)[1], true);
+});
+
+test('a successful create preserves a newer unsaved draft instead of redirecting', async () => {
+  const save = deferred();
+  const app = setup({ create: () => save.promise });
+  await flush(); app.fill('저장 중인 과제');
+  const done = app.submit();
+  app.fill('새로 작성하는 과제', '새 초안 내용'); await app.fire('assignmentForm', 'input');
+  save.resolve({ success: true, assignment_id: 43 });
+  await done;
+  assert.equal(app.window.location.href, '');
+  assert.equal(app.node('taskTitle').value, '새로 작성하는 과제');
+  assert.equal(app.node('taskContent').value, '새 초안 내용');
+  assert.equal(app.calls.cache.at(-1).data[0].assignment_id, 43);
+});
+
+test('queued creates redirect after the last successful response without dropping another pending save', async () => {
+  for (const order of [[0, 1], [1, 0]]) {
+    const saves = [deferred(), deferred()];
+    const app = setup({ create: payload => saves[payload.title === '첫 과제' ? 0 : 1].promise });
+    await flush(); app.fill('첫 과제'); const first = app.submit();
+    app.fill('둘째 과제'); const second = app.submit();
+    const operations = [first, second];
+    saves[order[0]].resolve({ success: true, assignment_id: 50 + order[0] });
+    await operations[order[0]];
+    assert.equal(app.window.location.href, '', 'the other write is still pending');
+    saves[order[1]].resolve({ success: true, assignment_id: 50 + order[1] });
+    await operations[order[1]];
+    assert.equal(app.window.location.href, 'calendar.html');
+    assert.equal(app.calls.cache.at(-1).data.filter(row => row.assignment_id === 50 || row.assignment_id === 51).length, 2);
+  }
+});
+
+test('a failed queued create keeps its restored or recoverable draft even when another create succeeds', async () => {
+  for (const failedFirst of [true, false]) {
+    const firstSave = deferred(), secondSave = deferred();
+    const app = setup({ create: payload => payload.title === '첫 과제' ? firstSave.promise : secondSave.promise });
+    await flush(); app.fill('첫 과제'); const first = app.submit();
+    app.fill('둘째 과제'); const second = app.submit();
+    if (failedFirst) {
+      firstSave.resolve({ error: '첫 저장 실패' }); await first;
+      secondSave.resolve({ success: true, assignment_id: 55 }); await second;
+      assert.ok(app.html().includes('입력 복원'));
+    } else {
+      firstSave.resolve({ success: true, assignment_id: 54 }); await first;
+      secondSave.resolve({ error: '둘째 저장 실패' }); await second;
+      assert.equal(app.node('taskTitle').value, '둘째 과제');
+    }
+    assert.equal(app.window.location.href, '');
+  }
+});
+
+test('an active edit or upload blocks a prior create redirect', async () => {
+  for (const activity of ['edit', 'upload']) {
+    const save = deferred();
+    const app = setup({ create: () => save.promise });
+    await flush(); app.fill('등록할 과제'); const done = app.submit();
+    if (activity === 'edit') await app.action('edit-my', 11);
+    else vm.runInContext('isUploadingTaskImage = true', app.context);
+    save.resolve({ success: true, assignment_id: 56 }); await done;
+    assert.equal(app.window.location.href, '');
+    if (activity === 'edit') assert.equal(app.node('taskTitle').value, '원래 과제');
+    vm.runInContext('isUploadingTaskImage = false', app.context);
+    await app.action('edit-my', 11); app.fill('별도로 수정한 과제');
+    await app.submit();
+    assert.equal(app.window.location.href, '', 'a blocked earlier create must not redirect a later standalone edit');
+  }
 });
 
 test('one failed queued create cannot erase a different create that has already succeeded', async () => {
@@ -221,6 +318,7 @@ test('old account and class writes never warm a new scope cache or restore old d
       assert.ok(!app.html().includes('이전 범위 초안'));
       assert.equal(app.node('taskTitle').value, '');
       assert.equal(app.calls.cache.length, 0);
+      assert.equal(app.window.location.href, '', 'a late write from a former scope must not navigate');
     }
   }
 });

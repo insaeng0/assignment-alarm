@@ -13,6 +13,7 @@ API.requireAuth();
     let lastResetDraft = null;
     let listError = '';
     let assignmentScope = null;
+    let dashboardRedirectScope = null;
     const pendingOperations = new Map();
     const confirmedOverrides = new Map();
     const failedDrafts = new Map();
@@ -30,6 +31,7 @@ API.requireAuth();
       assignmentScope = next;
       assignmentsCache = [];
       pendingOperations.clear(); confirmedOverrides.clear(); failedDrafts.clear();
+      dashboardRedirectScope = null;
       listVersion += 1; mutationVersion += 1; listError = '';
       uploadOperation = null; isUploadingTaskImage = false;
       document.getElementById('insertImageBtn').disabled = false;
@@ -256,6 +258,16 @@ API.requireAuth();
 
     function sameDraft(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 
+    function redirectAfterConfirmedRegistration(scope) {
+      if (dashboardRedirectScope !== scope || !ownsAssignmentScope(scope)) return;
+      if (pendingOperations.size) return;
+      // A successful earlier create must not discard a newer draft or a failed
+      // queued save. Navigate only after the confirmed work leaves a clean form.
+      dashboardRedirectScope = null;
+      if (isUploadingTaskImage || failedDrafts.size || editingAssignmentId !== null || !sameDraft(captureDraft(), lastResetDraft)) return;
+      window.location.href = 'calendar.html';
+    }
+
     function restoreDraft(draft) {
       draftRevision += 1;
       editingAssignmentId = draft.editingId;
@@ -437,8 +449,11 @@ API.requireAuth();
         cacheConfirmedAssignments(scope);
         AppUI.toast(editingId ? '과제 수정이 저장됐어요.' : '새 과제가 저장됐어요.');
         API.refreshNotifications().catch(() => {});
+        if (!editingId) dashboardRedirectScope = scope;
+        redirectAfterConfirmedRegistration(scope);
       } catch (error) {
         if (!ownsAssignmentScope(scope)) return;
+        dashboardRedirectScope = null;
         const index = assignmentsCache.findIndex(item => item._operationId === key);
         if (index >= 0) {
           if (original) assignmentsCache.splice(index, 1, original);
@@ -523,8 +538,10 @@ API.requireAuth();
         cacheConfirmedAssignments(scope);
         AppUI.toast('과제가 삭제됐어요.');
         API.refreshNotifications().catch(() => {});
+        redirectAfterConfirmedRegistration(scope);
       } catch (error) {
         if (!ownsAssignmentScope(scope)) return;
+        dashboardRedirectScope = null;
         pendingOperations.delete(key);
         invalidateListLoads();
         if (!assignmentsCache.some(item => Number(item.assignment_id) === id)) assignmentsCache.splice(Math.min(operation.index, assignmentsCache.length), 0, assignment);
