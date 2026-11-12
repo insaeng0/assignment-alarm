@@ -52,7 +52,10 @@ test('Pages artifact contains only live frontend files with public bearer config
       }
     }
     const index = await fs.readFile(path.join(output, 'index.html'), 'utf8');
-    assert.ok(index.includes('url=calendar.html'));
+    assert.ok(!index.includes('http-equiv="refresh"'));
+    assert.ok(index.includes('id="entryStatus"'));
+    assert.ok(index.indexOf('js/runtime-config.js') < index.indexOf('js/index.js'));
+    assert.ok(index.indexOf('js/api.js') < index.indexOf('js/index.js'));
     assert.ok(index.includes('src="js/index.js'));
   } finally { await fs.rm(temp, { recursive: true, force: true }); }
 });
