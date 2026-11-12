@@ -67,7 +67,7 @@ export async function buildPages({ apiBaseUrl = process.env.ASSIGNMENT_API_BASE_
   // The public URL is data, never shell/script code. No secrets belong in this build.
   const apiOrigin = validateApiOrigin(apiBaseUrl);
   if (authRealm && !/^[a-f0-9]{64}$/.test(authRealm)) throw new Error('ASSIGNMENT_AUTH_REALM must be 64 lowercase hex characters');
-  const config = { apiBaseUrl: apiOrigin, authMode: 'bearer', ...(authRealm ? { authRealm } : {}) };
+  const config = { apiBaseUrl: apiOrigin, authMode: 'bearer', runtimeSchemaVersion: 2, ...(authRealm ? { authRealm } : {}) };
   const configVersion = createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 12);
   const output = path.resolve(outputDir);
   if (output === path.parse(output).root || output === repositoryRoot || output === sourceRoot || sourceRoot.startsWith(output + path.sep) || output.startsWith(sourceRoot + path.sep)) {
@@ -95,8 +95,9 @@ export async function buildPages({ apiBaseUrl = process.env.ASSIGNMENT_API_BASE_
       await fs.copyFile(source, target);
     }
   }
-  await fs.writeFile(path.join(output, 'js', 'runtime-config.js'), '// Public Pages configuration. No credentials are stored here.\nwindow.ASSIGNMENT_CONFIG = Object.freeze(' + JSON.stringify(config) + ');\n');
-  return { outputDir: output, apiOrigin, authMode: 'bearer', runtimeConfigVersion: configVersion, files: frontendFiles.length + 1 };
+  await fs.writeFile(path.join(output, 'js', 'runtime-config.js'), '// Public Pages configuration. No credentials are stored here.\nwindow.ASSIGNMENT_CONFIG = Object.freeze(' + JSON.stringify(config) + ');\nwindow.ASSIGNMENT_CONFIG_VERSION = ' + JSON.stringify(configVersion) + ';\n');
+  await fs.writeFile(path.join(output, 'js', 'runtime-config.json'), JSON.stringify({ ...config, runtimeConfigVersion: configVersion }) + '\n');
+  return { outputDir: output, apiOrigin, authMode: 'bearer', runtimeConfigVersion: configVersion, files: frontendFiles.length + 2 };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

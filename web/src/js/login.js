@@ -44,11 +44,16 @@ async function finalizeGoogleLogin(user) {
       el.style.display = 'block';
       document.getElementById('loginStatus').hidden = true;
       document.getElementById('retryLoginConfig').hidden = !retryConfig;
+      document.getElementById('connectionDetails').hidden = !retryConfig;
+      if (retryConfig) {
+        try { document.getElementById('connectionInfo').textContent = `화면: ${window.location.origin}\n서버: ${API.getApiOrigin()}\n설정: ${window.ASSIGNMENT_CONFIG_VERSION || '이전 설정'}`; } catch {}
+      }
     }
 
     function hideError() {
       document.getElementById('authError').style.display = 'none';
       document.getElementById('retryLoginConfig').hidden = true;
+      document.getElementById('connectionDetails').hidden = true;
     }
 
     function showLoginForm() {
@@ -77,7 +82,7 @@ async function handleGoogleCredential(credential) {
   try {
     const res = await API.googleAuth(credential);
     if (!res || res.error) {
-      showError(res?.error || '구글 로그인에 실패했습니다.');
+      showError(res?.error || '구글 로그인에 실패했습니다.', { retryConfig: ['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'CONNECTION_REFRESH'].includes(res?.code) });
       return;
     }
     if (res.requiresProfile) {
@@ -147,7 +152,7 @@ async function handleGoogleCredential(credential) {
           renderGoogleLoginIfNeeded();
           return;
         }
-        const canRetry = ['NETWORK_ERROR', 'REQUEST_TIMEOUT'].includes(config?.code)
+        const canRetry = ['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'CONNECTION_REFRESH'].includes(config?.code)
           || (config?.success === false && Number(config.status) >= 500);
         showError(config?.error || '구글 로그인이 아직 설정되지 않았습니다.', { retryConfig: canRetry });
       } finally {

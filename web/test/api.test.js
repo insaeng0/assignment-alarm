@@ -419,6 +419,8 @@ test('login exposes an explicit reconnect button after a network failure and ret
   await new Promise(setImmediate);
   assert.equal(configCalls, 1);
   assert.equal(ui.nodes.get('retryLoginConfig').hidden, false);
+  assert.equal(ui.nodes.get('connectionDetails').hidden, false);
+  assert.match(ui.nodes.get('connectionInfo').textContent, /https:\/\/school\.example/);
   assert.match(ui.nodes.get('authError').textContent, /연결/);
   connected = true;
   ui.listeners.get('retryLoginConfig:click')();
@@ -621,4 +623,69 @@ test('a signed-out login page never reloads itself and successful login finalize
   context.verifiedUser = { id: 8, grade: 1, class_number: 2, can_complete_assignments: true };
   await vm.runInContext('finalizeGoogleLogin(verifiedUser)', context);
   assert.equal(window.location.replaced, '/assignment/calendar.html');
+});
+
+test('login network recovery reads only the owner manifest and reloads once without sending tokens to a new API', async () => {
+  const calls = [];
+  const manifest = { apiBaseUrl: 'https://replacement.trycloudflare.com', authMode: 'bearer', authRealm: persistentRealm, runtimeConfigVersion: 'a'.repeat(12) };
+  const { api, window } = createAPI({ config: persistentConfig, pathname: '/assignment/login.html', fetch: async (url, options) => {
+    calls.push({ url, options });
+    if (url.includes('/js/runtime-config.json')) return response(manifest);
+    throw new TypeError('old relay unavailable');
+  } });
+  window.ASSIGNMENT_CONFIG_VERSION = 'b'.repeat(12);
+  api.setToken(token, expiresAt());
+  const result = await api.me();
+  assert.equal(result.code, 'CONNECTION_REFRESH');
+  assert.equal(window.location.replaced, '/assignment/login.html?__connection=' + 'a'.repeat(12));
+  const probe = calls.find(call => call.url.includes('runtime-config.json'));
+  assert.equal(new URL(probe.url).origin, 'https://school.example');
+  assert.equal(probe.options.credentials, 'omit'); assert.equal(probe.options.redirect, 'error'); assert.equal(probe.options.cache, 'no-store');
+  assert.equal(probe.options.headers, undefined);
+  assert.ok(!calls.some(call => call.url.startsWith(manifest.apiBaseUrl)));
+  assert.equal(api.getToken(), token);
+  window.location.replaced = undefined;
+  assert.equal(await api.recoverRuntimeConfig(), false);
+  assert.equal(window.location.replaced, undefined);
+});
+test('runtime recovery rejects foreign realms and unsafe origins, and never reloads an editing page', async () => {
+  for (const unsafe of [{ authRealm: 'd'.repeat(64) }, { apiBaseUrl: 'http://unsafe.example' }, { apiBaseUrl: 'https://safe.example/path' }]) {
+    const { api, window } = createAPI({ config: persistentConfig, pathname: '/assignment/login.html', fetch: async () => response({ apiBaseUrl: 'https://new.example', authMode: 'bearer', authRealm: persistentRealm, runtimeConfigVersion: 'a'.repeat(12), ...unsafe }) });
+    window.ASSIGNMENT_CONFIG_VERSION = 'b'.repeat(12);
+    assert.equal(await api.recoverRuntimeConfig(), false); assert.equal(window.location.href, '');
+  }
+  let calls = 0;
+  const editor = createAPI({ config: persistentConfig, pathname: '/assignment/register.html', fetch: async () => { calls++; throw new Error('must not probe while editing'); } });
+  editor.window.ASSIGNMENT_CONFIG_VERSION = 'b'.repeat(12);
+  assert.equal(await editor.api.recoverRuntimeConfig(), false); assert.equal(calls, 0);
+});
+test('an old document CSP is replaced with the new owner-published document rather than weakened', async () => {
+  const doc = { documentElement: { classList: { toggle() {} }, dataset: {} }, body: null,
+    querySelector: () => ({ content: "default-src 'self'; connect-src 'self' https://old-relay.example" }) };
+  const manifest = { ...persistentConfig, runtimeConfigVersion: 'a'.repeat(12) };
+  const { api, window } = createAPI({ config: persistentConfig, pathname: '/assignment/login.html', document: doc, fetch: async () => response(manifest) });
+  window.ASSIGNMENT_CONFIG_VERSION = manifest.runtimeConfigVersion;
+  assert.equal(await api.recoverRuntimeConfig(), true);
+  assert.match(window.location.replaced, /__connection=/);
+});
+test('a proxy 502 can recover a changed login connection before its HTML error body is parsed', async () => {
+  const { api, window } = createAPI({ config: persistentConfig, pathname: '/assignment/login.html', fetch: async url => url.includes('runtime-config.json')
+    ? response({ ...persistentConfig, apiBaseUrl: 'https://new.example', runtimeConfigVersion: 'c'.repeat(12) })
+    : { status: 502, ok: false, json: async () => { throw new Error('proxy HTML'); } } });
+  window.ASSIGNMENT_CONFIG_VERSION = 'b'.repeat(12);
+  assert.equal((await api.publicConfig({ force: true })).code, 'CONNECTION_REFRESH');
+  assert.match(window.location.replaced, /__connection=/);
+});
+
+test('a failed remembered-login refresh can recover its old connection without deleting the saved session', async () => {
+  const f = persistentFixture(); await f.open().api.googleAuth('credential');
+  const app = f.open({ pathname: '/assignment/login.html', fetch: async (url, options) => {
+    if (url.includes('runtime-config.json')) return response({ ...persistentConfig, apiBaseUrl: 'https://new.example', runtimeConfigVersion: 'e'.repeat(12) });
+    if (url.endsWith('/auth/refresh')) throw new TypeError('old relay disappeared');
+    return f.fetcher(url, options);
+  } });
+  app.window.ASSIGNMENT_CONFIG_VERSION = 'b'.repeat(12);
+  assert.equal((await app.api.refreshRememberedSession()).code, 'CONNECTION_REFRESH');
+  assert.equal(f.indexedDB.records.size, 1);
+  assert.match(app.window.location.replaced, /__connection=/);
 });

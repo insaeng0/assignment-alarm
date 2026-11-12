@@ -167,6 +167,7 @@ const API = {
           return { available: true, refreshed: true };
         }
       } catch (error) {
+        if (await this.recoverRuntimeConfig()) return { available: true, transient: true, code: 'CONNECTION_REFRESH', error: '새 서버 연결 정보를 적용하고 있습니다…' };
         return { available: true, transient: true, code: error?.code || 'NETWORK_ERROR', error: error?.message || '로그인 상태를 갱신하지 못했습니다.' };
       }
       return { available: true, transient: true, error: '로그인 상태를 다시 확인해주세요.' };
@@ -246,6 +247,40 @@ const API = {
       if (Array.isArray(index)) for (const key of index) if (typeof key === 'string' && key.startsWith('assignment-data:')) this.storageRemove(key);
     } catch {}
     this.storageRemove(this.dataCacheIndexKey);
+  },
+  runtimeRecoveryPromise: null,
+  async recoverRuntimeConfig() {
+    // Read only owner-published same-origin JSON. Reload the document so its
+    // exact CSP changes together with the API address; never widen CSP in place.
+    if (!this.isLoginPage() || this.getAuthMode() !== 'bearer' || !window.ASSIGNMENT_CONFIG_VERSION || !this.getAuthRealm()) return false;
+    if (this.runtimeRecoveryPromise) return this.runtimeRecoveryPromise;
+    this.runtimeRecoveryPromise = (async () => {
+      try {
+        const manifestUrl = new URL(this.frontendBasePath() + 'js/runtime-config.json', window.location.origin);
+        manifestUrl.searchParams.set('fresh', String(Date.now()));
+        const response = await fetch(manifestUrl.toString(), { credentials: 'omit', redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(5000) });
+        if (!response.ok) return false;
+        const manifest = await response.json();
+        if (manifest.authMode !== 'bearer' || manifest.authRealm !== this.getAuthRealm() || !/^[a-f0-9]{12}$/.test(manifest.runtimeConfigVersion || '')) return false;
+        const api = new URL(manifest.apiBaseUrl);
+        if (api.protocol !== 'https:' || api.origin !== manifest.apiBaseUrl || api.username || api.password) return false;
+        const meta = document.querySelector?.('meta[http-equiv="Content-Security-Policy"]');
+        const policy = meta?.content || meta?.getAttribute?.('content') || '';
+        const connect = policy.split(';').map(value => value.trim()).find(value => value.startsWith('connect-src '));
+        const blockedByDocument = connect && !connect.split(/\s+/).includes(api.origin) && !(api.origin === window.location.origin && connect.includes("'self'"));
+        if (manifest.runtimeConfigVersion === window.ASSIGNMENT_CONFIG_VERSION && manifest.apiBaseUrl === this.getApiOrigin() && !blockedByDocument) return false;
+        const destination = new URL(window.location.pathname + (window.location.search || '') + (window.location.hash || ''), window.location.origin);
+        if (destination.searchParams.get('__connection') === manifest.runtimeConfigVersion) return false;
+        let previous = null;
+        try { previous = JSON.parse(sessionStorage.getItem('assignment-connection-reload') || 'null'); } catch {}
+        if (previous?.version === manifest.runtimeConfigVersion && Date.now() - previous.at < 5 * 60 * 1000) return false;
+        try { sessionStorage.setItem('assignment-connection-reload', JSON.stringify({ version: manifest.runtimeConfigVersion, at: Date.now() })); } catch {}
+        destination.searchParams.set('__connection', manifest.runtimeConfigVersion);
+        window.location.replace(destination.pathname + destination.search + destination.hash);
+        return true;
+      } catch { return false; }
+    })().finally(() => { this.runtimeRecoveryPromise = null; });
+    return this.runtimeRecoveryPromise;
   },
   isEmbedded() {
     try { return Boolean(window.top && window.self && window.top !== window.self); } catch { return true; }
@@ -750,6 +785,7 @@ const API = {
         if (!this.isLoginPage()) window.location.href = this.appPageUrl('login.html');
         return { success: false, status: 401, error: '인증이 만료되었습니다.' };
       }
+      if (res.status >= 500 && await this.recoverRuntimeConfig()) return { success: false, code: 'CONNECTION_REFRESH', error: '새 서버 연결 정보를 적용하고 있습니다…' };
       let data;
       try { data = await res.json(); } catch {
         return { success: false, status: res.status, error: '서버가 응답하지 않습니다. 잠시 후 다시 시도해주세요.' };
@@ -772,9 +808,10 @@ const API = {
       return data;
     } catch (error) {
       if (error?.code === 'API_CONFIG') return { success: false, code: 'API_CONFIG', error: error.message };
+      if (await this.recoverRuntimeConfig()) return { success: false, code: 'CONNECTION_REFRESH', error: '새 서버 연결 정보를 적용하고 있습니다…' };
       return { success: false, code: error?.name === 'AbortError' ? 'REQUEST_TIMEOUT' : 'NETWORK_ERROR', error: error?.name === 'AbortError'
         ? '응답 시간이 초과되었습니다. 다시 시도해주세요.'
-        : '서버에 연결할 수 없습니다. 인터넷 연결을 확인하고 다시 시도해주세요.' };
+        : '서버에 연결할 수 없습니다. 연결 다시 시도를 눌러주세요.' };
     } finally {
       clearTimeout(timeout);
     }

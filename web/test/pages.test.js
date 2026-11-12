@@ -34,13 +34,16 @@ test('Pages artifact contains only live frontend files with public bearer config
     const names = await fs.readdir(output, { recursive: true });
     const actual = [];
     for (const name of names) if ((await fs.stat(path.join(output, name))).isFile()) actual.push(name.replace(/\\/g, '/'));
-    assert.deepEqual(actual.sort(), [...frontendFiles, 'js/runtime-config.js'].sort());
+    assert.deepEqual(actual.sort(), [...frontendFiles, 'js/runtime-config.js', 'js/runtime-config.json'].sort());
     for (const name of actual) assert.ok(!/(^|\/)(\.env|server\.js|uploads|node_modules|mysql|chatbot)/.test(name), name);
     const runtime = await fs.readFile(path.join(output, 'js/runtime-config.js'), 'utf8');
     const context = vm.createContext({ window: {} });
     vm.runInContext(runtime, context);
     assert.equal(context.window.ASSIGNMENT_CONFIG.apiBaseUrl, 'https://api.example.com');
     assert.equal(context.window.ASSIGNMENT_CONFIG.authMode, 'bearer');
+    const manifest = JSON.parse(await fs.readFile(path.join(output, 'js/runtime-config.json'), 'utf8'));
+    assert.equal(manifest.runtimeConfigVersion, context.window.ASSIGNMENT_CONFIG_VERSION);
+    assert.equal(manifest.apiBaseUrl, context.window.ASSIGNMENT_CONFIG.apiBaseUrl);
     for (const name of actual.filter(name => name.endsWith('.html'))) {
       const html = await fs.readFile(path.join(output, name), 'utf8');
       assert.ok(html.includes('http-equiv="Content-Security-Policy"'), name);
