@@ -34,34 +34,36 @@
   --sidebar-width: 216px;
 }
 html.theme-dark {
-  --bg-app: #121b17;
-  --bg-surface: #1b2620;
-  --bg-surface-soft: #1c2922;
-  --bg-surface-alt: #243129;
-  --bg-muted: #26372d;
-  --bg-muted-strong: #31483a;
-  --bg-accent-soft: #293e32;
-  --bg-header: #173c2b;
-  --bg-header-strong: #22523c;
-  --bg-input: #1b2620;
-  --bg-input-disabled: #243129;
-  --text-main: #d2ddd5;
-  --text-strong: #eef4ee;
-  --text-muted: #a4b7aa;
-  --text-subtle: #a0b2a6;
-  --text-faint: #a0b2a6;
-  --border-color: #3b4d40;
-  --border-soft: #2d3d32;
-  --border-panel: #304136;
-  --focus-color: #a5d2b5;
-  --link-color: #b3d8bc;
-  --accent: #acd1b6;
-  --urgent-bg: #493126;
-  --urgent-text: #ffba93;
-  --normal-bg: #2d4436;
-  --normal-text: #b2d2b8;
-  --done-bg: #2c3630;
-  --done-text: #b4c1b7;
+  --bg-app: #101217;
+  --bg-surface: #191c23;
+  --bg-surface-soft: #171a21;
+  --bg-surface-alt: #20242d;
+  --bg-muted: #252b35;
+  --bg-muted-strong: #303845;
+  --bg-accent-soft: #22352d;
+  --bg-header: #20242d;
+  --bg-header-strong: #303845;
+  --bg-input: #171b22;
+  --bg-input-disabled: #232832;
+  --text-main: #d6dde8;
+  --text-strong: #f3f6fa;
+  --text-muted: #a3afbf;
+  --text-subtle: #9ba8b9;
+  --text-faint: #9ba8b9;
+  --border-color: #3a4351;
+  --border-soft: #292f39;
+  --border-panel: #2d3440;
+  --focus-color: #a5d9bd;
+  --link-color: #a5d9bd;
+  --accent: #83cba7;
+  --urgent-bg: #392a25;
+  --urgent-text: #f0b18e;
+  --normal-bg: #20372d;
+  --normal-text: #9ed7b6;
+  --done-bg: #282e38;
+  --done-text: #b7c0ce;
+  --shadow-soft: 0 3px 14px #00000014;
+  --shadow-card: 0 4px 20px #00000020;
 }
 body { letter-spacing: -.025em; font-size: 14px; }
 svg { flex-shrink: 0; }
@@ -216,9 +218,39 @@ svg { flex-shrink: 0; }
 .auth-box > p:not(.eyebrow):not(.auth-footnote) { font-size: 13px; line-height: 1.8; }
 .auth-box .auth-footnote { margin-top: 40px; font-size: 10px; color: var(--text-subtle); text-align: left; }
 .google-login-button { min-height: 44px; }
-html.theme-dark .auth-intro { background: #253d2d; }
-html.theme-dark .auth-intro .brand, html.theme-dark .auth-intro h2 { color: #e6f1e6; }
-html.theme-dark .auth-intro .eyebrow, html.theme-dark .auth-intro-description, html.theme-dark .auth-intro-foot { color: #bad0be; }
+html.theme-dark .brand-mark,
+html.theme-dark .btn-primary,
+html.theme-dark .day.today .date { background: #83cba7; color: #12261c; box-shadow: none; }
+html.theme-dark .btn-primary:hover { background: #a3dbbe; }
+html.theme-dark .toggle.on { background: #83cba7; }
+html.theme-dark .toggle::after { background: #f3f6fa; }
+html.theme-dark .toggle.on::after { background: #12261c; }
+html.theme-dark .notification-badge { background: #efb191; color: #261b15; }
+html.theme-dark .sidebar-note svg { color: #86b39c; }
+html.theme-dark .day.today { background: #1c2925; }
+html.theme-dark .progress-card { background: #202c2b; border: 1px solid #34443f; }
+html.theme-dark .progress-card h2,
+html.theme-dark .progress-line strong { color: #f3f6fa; }
+html.theme-dark .progress-card .eyebrow { color: #a2c6b3; }
+html.theme-dark .progress-card .aside-description,
+html.theme-dark .progress-line span { color: #b1c2bb; }
+html.theme-dark .progress-track { background: #35433d; }
+html.theme-dark .progress-track > span { background: #83cba7; }
+html.theme-dark .progress-decoration { color: #a2c6b3; opacity: .13; }
+html.theme-dark .auth-intro { background: #141920; }
+html.theme-dark .auth-intro .brand,
+html.theme-dark .auth-intro h2 { color: #f3f6fa; }
+html.theme-dark .auth-intro .eyebrow { color: #83cba7; }
+html.theme-dark .auth-intro-description,
+html.theme-dark .auth-intro-foot { color: #a3afbf; }
+html.theme-dark .auth-preview {
+  background: #202630; border-color: #353e4b; box-shadow: 0 12px 35px #00000020;
+  --text-main: #d6dde8; --text-subtle: #9ba8b9; --border-soft: #353d48; --border-color: #566375;
+}
+html.theme-dark .preview-top { color: #b0c4b9; }
+html.theme-dark .preview-check.completed,
+html.theme-dark .preview-week .current { background: #83cba7; border-color: #83cba7; color: #12261c; }
+html.theme-dark .preview-pill { background: #392a25; color: #f0b18e; }
 @media (min-width: 1600px) { .container { padding-top: 46px; } .day { min-height: 115px; } }
 @media (max-width: 1180px) {
   :root { --sidebar-width: 190px; }
