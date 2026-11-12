@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { acceptedTunnelOrigin, cloudflareTunnelOrigin, cloudflareArguments, nextProvider, providerOrigin, validatePrivateEnv, replaceAppOrigin, updateAppOrigin, sshArguments, githubCommands, verifyBackend, FRONTEND_ORIGIN } from './run-mac-tunnel.mjs';
+import { adoptionFingerprint, acceptedTunnelOrigin, cloudflareTunnelOrigin, cloudflareArguments, nextProvider, providerOrigin, validatePrivateEnv, replaceAppOrigin, updateAppOrigin, sshArguments, githubCommands, verifyBackend, FRONTEND_ORIGIN } from './run-mac-tunnel.mjs';
 
 const origin = 'https://abcd1234.lhr.life';
 const client = '12345-test.apps.googleusercontent.com';
@@ -81,4 +81,10 @@ test('automatic recovery changes provider only after repeated connection failure
   assert.equal(nextProvider('cloudflare', 'cloudflare', 9), 'cloudflare');
   assert.equal(validatePrivateEnv(env).provider, 'auto');
   assert.throws(() => validatePrivateEnv(env + 'TUNNEL_PROVIDER=untrusted\n'));
+});
+
+test('adopting a verified recovery process is bound to its owner, start identity and loopback target', () => {
+  const identity = '501 Thu Nov 12 21:45:00 2026 /opt/homebrew/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3100 --protocol http2';
+  assert.equal(adoptionFingerprint(identity, 3100, 501), identity);
+  for (const value of [identity.replace('501 ', '502 '), identity.replace(':3100 ', ':3200 '), identity.replace('cloudflared tunnel', 'other tunnel'), identity+' --token private']) assert.throws(() => adoptionFingerprint(value,3100,501));
 });

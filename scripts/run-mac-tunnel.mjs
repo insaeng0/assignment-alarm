@@ -129,7 +129,15 @@ export async function verifyBackend(origin, config, { fetcher = fetch, signal } 
   return true;
 }
 
-export async function runSupervisor({ repositoryRoot = root } = {}) {
+export function adoptionFingerprint(output, hostPort, uid) {
+  const value = String(output || '').trim();
+  if (!value.startsWith(String(uid) + ' ') || !/\bcloudflared tunnel\b/.test(value)
+    || !value.includes('--url http://127.0.0.1:' + hostPort + ' ')
+    || /--(?:token|credentials-file)\b/.test(value)) throw invalid('Existing recovery process does not match this app.');
+  return value;
+}
+
+export async function runSupervisor({ repositoryRoot = root, existingCloudflare = null } = {}) {
   const envPath = path.join(repositoryRoot, '.env.mac');
   const config = validatePrivateEnv(await fs.readFile(envPath, 'utf8'));
   const runtime = path.join(repositoryRoot, '.runtime');
@@ -144,7 +152,7 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
   let child = null, stopped = false, candidate = null, lastDispatchedOrigin = null, failures = 0, busy = false;
   let provider = config.provider === 'auto' ? 'cloudflare' : config.provider;
   let failedAttempts = 0;
-  let retryTimer, handshakeTimer, heartbeat;
+  let retryTimer, handshakeTimer, heartbeat, adoptedMonitor, candidateSince = 0;
   const state = async status => {
     const payload = { provider, status, origin: candidate, lastDispatchedOrigin, supervisorPid: process.pid, tunnelPid: child?.pid || null, sshPid: provider === 'localhost.run' ? child?.pid || null : null, updatedAt: new Date().toISOString() };
     const temp = path.join(runtime, '.tunnel-state-' + randomBytes(6).toString('hex'));
@@ -155,6 +163,7 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
   let finish;
   const done = new Promise(resolve => { finish = resolve; });
   const killOwnedChild = () => {
+    clearInterval(adoptedMonitor);
     const owned = child; child = null;
     if (!owned) return;
     owned.kill('SIGTERM');
@@ -207,7 +216,7 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
       failures++;
       await state('verification_or_publish_retry').catch(() => {});
       log('Verification/publication failed; will retry.');
-      if (failures >= 3) reconnect();
+      if (failures >= 3 && (lastDispatchedOrigin === origin || Date.now() - candidateSince >= 120_000)) reconnect();
     } finally { busy = false; }
   };
   const connect = () => {
@@ -229,7 +238,7 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
           const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
           const origin = selectedProvider === 'cloudflare' ? cloudflareTunnelOrigin(line) : acceptedTunnelOrigin(line);
           if (!origin || stopped || child !== owned || origin === candidate) continue;
-          candidate = origin; failures = 0; clearTimeout(handshakeTimer);
+          candidate = origin; candidateSince = Date.now(); failures = 0; clearTimeout(handshakeTimer);
           log('Tunnel candidate: ' + origin);
           void adopt();
         }
@@ -244,10 +253,30 @@ export async function runSupervisor({ repositoryRoot = root } = {}) {
   process.on('SIGINT', onSignal); process.on('SIGTERM', onSignal);
   heartbeat = setInterval(() => { void adopt(); }, 20_000);
   log('Manual supervisor starting.');
-  connect();
+  if (existingCloudflare) {
+    try {
+    if (!['auto', 'cloudflare'].includes(config.provider) || !Number.isSafeInteger(existingCloudflare.pid) || existingCloudflare.pid < 2) throw invalid('Invalid recovery process.');
+    const origin = providerOrigin(existingCloudflare.origin);
+    if (!new URL(origin).hostname.endsWith('.trycloudflare.com')) throw invalid('Invalid recovery provider.');
+    const identity = async () => adoptionFingerprint((await execute('/bin/ps', ['-p', String(existingCloudflare.pid), '-o', 'uid=', '-o', 'lstart=', '-o', 'command='], { timeout: 2000 })).stdout, config.hostPort, process.getuid());
+    const fingerprint = await identity();
+    const owned = { pid: existingCloudflare.pid, exitCode: null, signalCode: null, kill(signal) {
+      void identity().then(current => { if (current === fingerprint) process.kill(existingCloudflare.pid, signal); }).catch(() => {});
+    } };
+    provider = 'cloudflare'; child = owned; candidate = origin; candidateSince = Date.now();
+    adoptedMonitor = setInterval(() => {
+      if (stopped || child !== owned) return;
+      void identity().then(current => { if (current !== fingerprint) throw new Error('process changed'); })
+        .catch(() => { if (!stopped && child === owned) { owned.exitCode = 0; reconnect(); } });
+    }, 10000);
+    await adopt();
+    } catch (error) { await stop('configuration_error'); throw error; }
+  } else connect();
   await done;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  runSupervisor().catch(() => { console.error('[tunnel] Startup failed; check private settings, SSH and gh access.'); process.exitCode = 1; });
+  const pid = process.env.ASSIGNMENT_ADOPT_CLOUDFLARE_PID;
+  const origin = process.env.ASSIGNMENT_ADOPT_CLOUDFLARE_ORIGIN;
+  runSupervisor({ existingCloudflare: pid || origin ? { pid: Number(pid), origin } : null }).catch(() => { console.error('[tunnel] Startup failed; check private settings, SSH and gh access.'); process.exitCode = 1; });
 }
