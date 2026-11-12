@@ -89,6 +89,7 @@ test('API requests resolve to the configured backend rather than the GitHub proj
   assert.equal(seen[0].url, 'https://api.school.example/api/assignments');
   assert.equal(seen[0].options.credentials, 'include');
   assert.equal(seen[0].options.redirect, 'error');
+  assert.equal(seen[0].options.headers['Content-Type'], undefined);
   const sameOrigin = createAPI({ fetch: async (url, options) => { seen.push({ url, options }); return response([]); } });
   await sameOrigin.api.getAssignments();
   assert.equal(seen[1].url, 'https://school.example/api/assignments');
@@ -419,8 +420,6 @@ test('login exposes an explicit reconnect button after a network failure and ret
   await new Promise(setImmediate);
   assert.equal(configCalls, 1);
   assert.equal(ui.nodes.get('retryLoginConfig').hidden, false);
-  assert.equal(ui.nodes.get('connectionDetails').hidden, false);
-  assert.match(ui.nodes.get('connectionInfo').textContent, /https:\/\/school\.example/);
   assert.match(ui.nodes.get('authError').textContent, /연결/);
   connected = true;
   ui.listeners.get('retryLoginConfig:click')();

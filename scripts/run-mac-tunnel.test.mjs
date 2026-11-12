@@ -54,14 +54,22 @@ test('SSH uses no agent, private key, password, user configuration, or shell; Gi
 test('public validation requires health, exact Pages CORS, bearer mode and the configured client ID', async () => {
   const config = validatePrivateEnv(env);
   const calls = [];
-  const fetcher = async (url, options) => { calls.push({ url, options }); return { ok: true, headers: { get: () => FRONTEND_ORIGIN }, json: async () => url.endsWith('/health') ? { status: 'ok' } : { authMode: 'bearer', googleClientId: client, authRealm: realm } }; };
+  const fetcher = async (url, options) => { calls.push({ url, options }); return { ok: true, status: options.method === 'OPTIONS' ? 204 : 200, headers: { get: name => ({ 'access-control-allow-origin': FRONTEND_ORIGIN, 'access-control-allow-methods': 'GET, POST', 'access-control-allow-headers': 'Content-Type, Authorization' })[name] }, json: async () => url.endsWith('/health') ? { status: 'ok' } : { authMode: 'bearer', googleClientId: client, authRealm: realm } }; };
   assert.equal(await verifyBackend(origin, config, { fetcher }), true);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 5);
   assert.ok(calls.every(call => call.options.redirect === 'error' && call.options.headers.Origin === FRONTEND_ORIGIN));
   for (const invalidConfig of [{ authMode: 'cookie', googleClientId: client, authRealm: realm }, { authMode: 'bearer', googleClientId: 'wrong-client', authRealm: realm }, { authMode: 'bearer', googleClientId: client, authRealm: 'b'.repeat(64) }]) {
     await assert.rejects(verifyBackend(origin, config, { fetcher: async url => ({ ok: true, headers: { get: () => FRONTEND_ORIGIN }, json: async () => url.endsWith('/health') ? { status: 'ok' } : invalidConfig }) }));
   }
   await assert.rejects(verifyBackend(origin, config, { fetcher: async () => ({ ok: true, headers: { get: () => 'https://evil.example' }, json: async () => ({ status: 'ok' }) }) }));
+  for (const status of [403, 530]) {
+    await assert.rejects(verifyBackend(origin, config, { fetcher: async (url, options) => options.method === 'OPTIONS' ? { status } : fetcher(url, options) }), error => error.publicStatus === status);
+  }
+  await assert.rejects(verifyBackend(origin, config, { fetcher: async (url, options) => {
+    const response = await fetcher(url, options);
+    if (options.method === 'OPTIONS') response.headers = { get: () => null };
+    return response;
+  } }), /preflight/);
 });
 
 

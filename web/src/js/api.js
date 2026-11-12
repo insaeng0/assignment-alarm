@@ -753,7 +753,8 @@ const API = {
       if (method !== 'GET' && !authControl) this.invalidateDataCache();
       const cacheRevision = this.dataCacheRevision;
       const cacheScope = this.dataCacheScope();
-      const headers = { 'Content-Type': 'application/json' };
+      // Bodyless reads do not need JSON Content-Type (or its extra preflight).
+      const headers = body === undefined ? {} : { 'Content-Type': 'application/json' };
       const token = bearer && !publicEndpoint ? this.getToken() : null;
       if (token) headers.Authorization = 'Bearer ' + token;
       const sessionGeneration = this.logoutGeneration;

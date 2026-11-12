@@ -128,11 +128,26 @@ export async function verifyBackend(origin, config, { fetcher = fetch, signal } 
   for (const route of ['/api/health', '/api/public-config']) {
     const timeout = AbortSignal.timeout(10_000);
     const response = await fetcher(safe + route, { headers: { Origin: FRONTEND_ORIGIN }, redirect: 'error', cache: 'no-store', signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
-    if (!response.ok) throw new Error('Public backend is not healthy.');
+    if (!response.ok) throw Object.assign(new Error('Public backend is not healthy.'), { publicStatus: response.status });
     const body = await response.json();
     if (response.headers.get('access-control-allow-origin') !== FRONTEND_ORIGIN) throw invalid('Public backend CORS origin does not match Pages.');
     if (route === '/api/health' && body?.status !== 'ok') throw new Error('Public backend health is not ready.');
     if (route === '/api/public-config' && (body?.authMode !== 'bearer' || body.googleClientId !== config.googleClientId || body.authRealm !== config.authRealm)) throw invalid('Public backend authentication configuration does not match private settings.');
+  }
+  // Probe the requests browsers actually preflight, including older GET clients.
+  for (const [route, method, headers] of [
+    ['/api/public-config', 'GET', 'content-type'],
+    ['/api/auth/me', 'GET', 'authorization'],
+    ['/api/auth/google', 'POST', 'content-type']
+  ]) {
+    const timeout = AbortSignal.timeout(10_000);
+    const response = await fetcher(safe + route, { method: 'OPTIONS', headers: {
+      Origin: FRONTEND_ORIGIN, 'Access-Control-Request-Method': method, 'Access-Control-Request-Headers': headers
+    }, redirect: 'error', cache: 'no-store', signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+    if (response.status !== 204) throw Object.assign(new Error('Public backend preflight is not ready.'), { publicStatus: response.status });
+    const methods = String(response.headers.get('access-control-allow-methods') || '').split(',').map(value => value.trim().toUpperCase());
+    const allowedHeaders = String(response.headers.get('access-control-allow-headers') || '').split(',').map(value => value.trim().toLowerCase());
+    if (response.headers.get('access-control-allow-origin') !== FRONTEND_ORIGIN || !methods.includes(method) || !allowedHeaders.includes(headers)) throw invalid('Public backend preflight does not match Pages.');
   }
   return true;
 }
@@ -223,7 +238,8 @@ export async function runSupervisor({ repositoryRoot = root, existingCloudflare 
       if (error?.code === 'CONFIG_INVALID') { log('Configuration mismatch; tunnel stopped.'); await stop('configuration_error'); return; }
       failures++;
       await state('verification_or_publish_retry').catch(() => {});
-      log('Verification/publication failed; will retry.');
+      const status = Number.isInteger(error?.publicStatus) ? ' (HTTP ' + error.publicStatus + ')' : '';
+      log('Verification/publication failed' + status + '; will retry.');
       if (failures >= 3 && (lastDispatchedOrigin === origin || Date.now() - candidateSince >= 120_000)) reconnect();
     } finally { busy = false; }
   };
