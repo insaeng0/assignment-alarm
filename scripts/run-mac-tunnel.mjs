@@ -1,0 +1,219 @@
+#!/usr/bin/env node
+// Manual tunnel supervisor. No Docker restarts, OS startup entries, or credential output.
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+export const FRONTEND_ORIGIN = 'https://kaneaigonan.github.io';
+export const REPOSITORY = 'kaneaigonan/assignment-alarm';
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const execute = promisify(execFile);
+const invalid = message => Object.assign(new Error(message), { code: 'CONFIG_INVALID' });
+
+export function providerOrigin(value) {
+  const raw = String(value || '').trim();
+  if (!/^https:\/\/[a-z0-9.-]+\/?$/i.test(raw)) throw invalid('Tunnel origin must be a path-free HTTPS provider URL.');
+  const url = new URL(raw);
+  const suffix = ['.lhr.life', '.localhost.run'].find(end => url.hostname.endsWith(end));
+  const prefix = suffix && url.hostname.slice(0, -suffix.length);
+  if (!prefix || url.hostname.length > 253 || !prefix.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)))
+    throw invalid('Unexpected tunnel provider hostname.');
+  return url.origin;
+}
+
+export function acceptedTunnelOrigin(line) {
+  if (typeof line !== 'string' || line.length > 256 * 1024) return null;
+  let event;
+  try { event = JSON.parse(line); } catch { return null; }
+  if (event?.specversion !== '1.0' || event.type !== 'v1.tcpip_forward.register.accepted' || event.source !== 'ssh://localhost.run/') return null;
+  try {
+    if (typeof event.id === 'string' && /^localhost\/[a-z0-9.-]+$/i.test(event.id)) return providerOrigin('https://' + event.id.slice('localhost/'.length));
+    const first = typeof event.data === 'string' && event.data.match(/https:\/\/[^\s<>"']+/i)?.[0];
+    return first ? providerOrigin(first) : null;
+  } catch { return null; }
+}
+
+export function validatePrivateEnv(text) {
+  const values = Object.create(null);
+  for (const line of String(text).split(/\r?\n/)) {
+    const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    if (Object.hasOwn(values, match[1])) throw invalid('Duplicate private configuration key: ' + match[1]);
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    values[match[1]] = value;
+  }
+  if (values.PAGES_AUTH_MODE !== 'bearer' || values.NODE_ENV !== 'production') throw invalid('Production bearer mode is required.');
+  if (values.FRONTEND_ORIGIN !== FRONTEND_ORIGIN) throw invalid('FRONTEND_ORIGIN does not match the configured Pages origin.');
+  if (!/^[1-9]\d{0,4}$/.test(values.HOST_PORT || '') || Number(values.HOST_PORT) > 65535) throw invalid('HOST_PORT must be an integer from 1 to 65535.');
+  if (!/^[\w-]+\.apps\.googleusercontent\.com$/.test(values.GOOGLE_CLIENT_ID || '')) throw invalid('A configured Google web client ID is required.');
+  if (!/^APP_ORIGIN=/m.test(text)) throw invalid('APP_ORIGIN is missing.');
+  return { hostPort: Number(values.HOST_PORT), frontendOrigin: values.FRONTEND_ORIGIN, googleClientId: values.GOOGLE_CLIENT_ID };
+}
+
+export function replaceAppOrigin(text, origin) {
+  validatePrivateEnv(text);
+  const safe = providerOrigin(origin);
+  return text.replace(/^APP_ORIGIN=[^\r\n]*/m, 'APP_ORIGIN=' + safe);
+}
+
+export async function updateAppOrigin(envPath, origin) {
+  const stat = await fs.lstat(envPath);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw invalid('Private environment must be a regular file.');
+  const original = await fs.readFile(envPath, 'utf8');
+  const updated = replaceAppOrigin(original, origin);
+  const temp = envPath + '.tunnel-' + process.pid + '-' + randomBytes(6).toString('hex');
+  try {
+    await fs.writeFile(temp, updated, { mode: 0o600, flag: 'wx' });
+    const current = await fs.readFile(envPath, 'utf8');
+    if (current !== original) throw invalid('Private configuration changed while updating the tunnel.');
+    await fs.rename(temp, envPath);
+    await fs.chmod(envPath, 0o600);
+  } finally { await fs.rm(temp, { force: true }); }
+}
+
+export function sshArguments(hostPort, knownHosts) {
+  if (!Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535) throw invalid('Invalid tunnel port.');
+  return ['-F', '/dev/null', '-T', '-o', 'BatchMode=yes', '-o', 'IdentityAgent=none', '-o', 'IdentityFile=none', '-o', 'IdentitiesOnly=yes',
+    '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', '-o', 'PreferredAuthentications=none',
+    '-o', 'ForwardAgent=no', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=' + knownHosts, '-o', 'GlobalKnownHostsFile=/dev/null',
+    '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-o', 'ConnectTimeout=15', '-o', 'ConnectionAttempts=1',
+    '-o', 'ExitOnForwardFailure=yes', '-o', 'LogLevel=ERROR', '-R', `80:127.0.0.1:${hostPort}`, 'nokey@localhost.run', '--', '--output', 'json'];
+}
+
+export function githubCommands(origin) {
+  const safe = providerOrigin(origin);
+  return [
+    ['variable', 'set', 'ASSIGNMENT_API_BASE_URL', '--repo', REPOSITORY, '--body', safe],
+    ['workflow', 'run', 'pages.yml', '--repo', REPOSITORY, '--ref', 'main', '-f', 'api_base_url=' + safe]
+  ];
+}
+
+export async function verifyBackend(origin, config, { fetcher = fetch, signal } = {}) {
+  const safe = providerOrigin(origin);
+  for (const route of ['/api/health', '/api/public-config']) {
+    const timeout = AbortSignal.timeout(10_000);
+    const response = await fetcher(safe + route, { headers: { Origin: FRONTEND_ORIGIN }, redirect: 'error', cache: 'no-store', signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+    if (!response.ok) throw new Error('Public backend is not healthy.');
+    const body = await response.json();
+    if (response.headers.get('access-control-allow-origin') !== FRONTEND_ORIGIN) throw invalid('Public backend CORS origin does not match Pages.');
+    if (route === '/api/health' && body?.status !== 'ok') throw new Error('Public backend health is not ready.');
+    if (route === '/api/public-config' && (body?.authMode !== 'bearer' || body.googleClientId !== config.googleClientId)) throw invalid('Public backend authentication configuration does not match private settings.');
+  }
+  return true;
+}
+
+export async function runSupervisor({ repositoryRoot = root } = {}) {
+  const envPath = path.join(repositoryRoot, '.env.mac');
+  const config = validatePrivateEnv(await fs.readFile(envPath, 'utf8'));
+  const runtime = path.join(repositoryRoot, '.runtime');
+  await fs.mkdir(runtime, { recursive: true, mode: 0o700 });
+  if ((await fs.lstat(runtime)).isSymbolicLink()) throw invalid('Runtime directory must not be a symbolic link.');
+  await fs.chmod(runtime, 0o700);
+  const knownHosts = path.join(runtime, 'localhost-run-known-hosts');
+  try { await fs.writeFile(knownHosts, '', { flag: 'wx', mode: 0o600 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  if ((await fs.lstat(knownHosts)).isSymbolicLink()) throw invalid('Known-hosts file must not be a symbolic link.');
+  await fs.chmod(knownHosts, 0o600);
+  const aborter = new AbortController();
+  let child = null, stopped = false, candidate = null, lastDispatchedOrigin = null, failures = 0, busy = false;
+  let retryTimer, handshakeTimer, heartbeat;
+  const state = async status => {
+    const payload = { provider: 'localhost.run', status, origin: candidate, lastDispatchedOrigin, supervisorPid: process.pid, sshPid: child?.pid || null, updatedAt: new Date().toISOString() };
+    const temp = path.join(runtime, '.tunnel-state-' + randomBytes(6).toString('hex'));
+    await fs.writeFile(temp, JSON.stringify(payload, null, 2) + '\n', { mode: 0o600 });
+    await fs.rename(temp, path.join(runtime, 'tunnel-state.json'));
+  };
+  const log = message => console.log('[tunnel] ' + message);
+  let finish;
+  const done = new Promise(resolve => { finish = resolve; });
+  const killOwnedChild = () => {
+    const owned = child; child = null;
+    if (!owned) return;
+    owned.kill('SIGTERM');
+    const force = setTimeout(() => { if (owned.exitCode === null && !owned.signalCode) owned.kill('SIGKILL'); }, 2000);
+    force.unref();
+  };
+  const stop = async reason => {
+    if (stopped) return;
+    stopped = true; clearTimeout(retryTimer); clearTimeout(handshakeTimer); clearInterval(heartbeat);
+    aborter.abort(); killOwnedChild();
+    await state(reason).catch(() => {});
+    process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal);
+    finish();
+  };
+  const onSignal = () => { void stop('stopped'); };
+  const reconnect = () => {
+    if (stopped) return;
+    clearTimeout(handshakeTimer); killOwnedChild(); candidate = null; failures = 0;
+    void state('retrying').catch(() => {});
+    if (!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; connect(); }, 5000);
+  };
+  const adopt = async () => {
+    if (busy || stopped || !candidate || !child) return;
+    busy = true;
+    const origin = candidate, owned = child;
+    try {
+      const latest = validatePrivateEnv(await fs.readFile(envPath, 'utf8'));
+      if (latest.hostPort !== config.hostPort || latest.googleClientId !== config.googleClientId) throw invalid('Private settings changed; restart the manual supervisor.');
+      await verifyBackend(origin, latest, { signal: aborter.signal });
+      if (stopped || candidate !== origin || child !== owned) return;
+      failures = 0;
+      if (lastDispatchedOrigin !== origin) {
+        await state('publishing');
+        await updateAppOrigin(envPath, origin);
+        for (const args of githubCommands(origin)) {
+          if (stopped || candidate !== origin || child !== owned) return;
+          await execute('gh', args, { cwd: repositoryRoot, shell: false, timeout: 30_000, maxBuffer: 32 * 1024, signal: aborter.signal });
+        }
+        if (stopped || candidate !== origin || child !== owned) return;
+        lastDispatchedOrigin = origin;
+        log('API verified; Pages publication requested: ' + origin);
+      }
+      await state('publish_requested');
+    } catch (error) {
+      if (stopped) return;
+      if (error?.code === 'CONFIG_INVALID') { log('Configuration mismatch; tunnel stopped.'); await stop('configuration_error'); return; }
+      failures++;
+      await state('verification_or_publish_retry').catch(() => {});
+      log('Verification/publication failed; will retry.');
+      if (failures >= 3) reconnect();
+    } finally { busy = false; }
+  };
+  const connect = () => {
+    if (stopped) return;
+    const environment = { ...process.env }; delete environment.SSH_AUTH_SOCK; delete environment.SSH_AGENT_PID;
+    child = spawn('/usr/bin/ssh', sshArguments(config.hostPort, knownHosts), { cwd: repositoryRoot, shell: false, env: environment, stdio: ['ignore', 'pipe', 'ignore'] });
+    const owned = child;
+    let buffer = '';
+    owned.stdout.setEncoding('utf8');
+    owned.stdout.on('data', chunk => {
+      buffer += chunk;
+      if (buffer.length > 256 * 1024) { buffer = ''; return; }
+      let newline;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
+        const origin = acceptedTunnelOrigin(line);
+        if (!origin || stopped || child !== owned || origin === candidate) continue;
+        candidate = origin; failures = 0; clearTimeout(handshakeTimer);
+        log('Tunnel candidate: ' + origin);
+        void adopt();
+      }
+    });
+    const ended = () => { if (!stopped && child === owned) { log('SSH disconnected; reconnecting.'); reconnect(); } };
+    owned.on('error', ended); owned.on('exit', ended);
+    handshakeTimer = setTimeout(() => { if (!candidate && child === owned) reconnect(); }, 45_000);
+    void state('connecting').catch(() => {});
+  };
+  process.on('SIGINT', onSignal); process.on('SIGTERM', onSignal);
+  heartbeat = setInterval(() => { void adopt(); }, 20_000);
+  log('Manual supervisor starting.');
+  connect();
+  await done;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  runSupervisor().catch(() => { console.error('[tunnel] Startup failed; check private settings, SSH and gh access.'); process.exitCode = 1; });
+}

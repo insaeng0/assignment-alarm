@@ -20,8 +20,8 @@
 
 ## 검증 결과
 
-- Node 24: 웹·서버·Pages 회귀 테스트 62개 통과
-- Mac 비공개 설정 생성 테스트 2개 통과
+- Node 24: 웹·서버·Pages 회귀 테스트 67개 통과
+- Mac 설정·중계 복구 테스트 7개 통과
 - 전체 JS 구문 검사 통과
 - 실행 시점의 npm audit --omit=dev: 알려진 취약점 0건
 - 브라우저: 데스크톱/모바일/다크모드와 예시 데이터의 달력·검색·필터·제출 체크·공지·설정 확인
@@ -37,3 +37,11 @@ DB·Google API 응답은 자동 테스트에서 대역을 사용합니다. 실�
 - Quick Tunnel 주소가 바뀌면 API 설정을 갱신합니다. 맥북 잠자기·전원·네트워크 단절 시 서버 기능은 멈춥니다.
 
 근거: [body-parser GHSA](https://github.com/advisories/GHSA-27r3-jxmh-p828), [qs GHSA](https://github.com/advisories/GHSA-6pq8-jhm2-2vcw), [Google GSI CSP](https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid#content_security_policy).
+
+## 접속 복구 보완
+
+- 기본 도메인의 404와 프로젝트 URL `/assignment-alarm/`을 구분했습니다.
+- 중단된 무료 중계는 재연결하고, 정상 응답·학교 Google 설정·정확한 CORS를 검증한 주소만 Pages에 배포하도록 했습니다.
+- 실패한 공개 설정과 기존 오류 캐시는 재사용하지 않습니다. 로그인 화면에 수동 재시도를 제공합니다.
+- API 주소가 바뀌면 runtime-config 파일 URL의 해시도 바뀌어 이전 연결 주소가 캐시에 남지 않습니다.
+- 중계 프로세스는 자신이 만든 SSH 연결만 관리합니다. SSH 개인키·에이전트·비밀번호를 사용하지 않으며, HTTPS API 주소만 GitHub에 전송합니다.

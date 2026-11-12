@@ -36,3 +36,4 @@ backups/
 cloudflared-credentials*.json
 dist-pages/
 _site/
+.runtime/
