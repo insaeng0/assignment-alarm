@@ -10,7 +10,7 @@ const args = process.argv.slice(2);
 const options = {};
 for (let i = 0; i < args.length; i += 2) {
   if (!['--api-origin', '--google-client-id', '--frontend-origin', '--admin-email', '--teacher-admins', '--host-port'].includes(args[i]) || !args[i + 1]) {
-    console.error('사용법: node scripts/configure-mac.mjs --api-origin https://API주소 --google-client-id Google웹클라이언트ID --admin-email 운영자학교이메일 [--frontend-origin https://kaneaigonan.github.io]');
+    console.error('사용법: node scripts/configure-mac.mjs --api-origin https://API주소 --google-client-id Google웹클라이언트ID --admin-email 운영자학교이메일 [--frontend-origin https://insaeng0.github.io]');
     process.exit(1);
   }
   options[args[i]] = args[i + 1];
@@ -27,7 +27,7 @@ function httpsOrigin(value, label) {
 
 try {
   const apiOrigin = httpsOrigin(options['--api-origin'], 'API 주소');
-  const frontendOrigin = httpsOrigin(options['--frontend-origin'] || 'https://kaneaigonan.github.io', '화면 주소');
+  const frontendOrigin = httpsOrigin(options['--frontend-origin'] || 'https://insaeng0.github.io', '화면 주소');
   const hostPort = options['--host-port'] || '3100';
   if (!/^[0-9]+$/.test(hostPort) || Number(hostPort) < 1 || Number(hostPort) > 65535) throw new Error('호스트 포트는 1~65535 정수여야 합니다.');
   const envPath = path.join(root, '.env.mac');

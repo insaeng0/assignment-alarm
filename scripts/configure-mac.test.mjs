@@ -45,7 +45,7 @@ test('Mac setup keeps secrets private and preserves DB passwords when API URL ch
     assert.equal(first.ALLOW_TEACHER_NUMBER_ADMINS, 'true');
     assert.equal(first.HOST_PORT, '3100');
     assert.equal(first.ASSIGNMENT_CONTAINER_PREFIX, 'assignment-mac');
-    assert.equal(first.FRONTEND_ORIGIN, 'https://kaneaigonan.github.io');
+    assert.equal(first.FRONTEND_ORIGIN, 'https://insaeng0.github.io');
     assert.equal(first.COOKIE_SAMESITE, 'lax');
     assert.match(first.JWT_SECRET, /^[a-f0-9]{96}$/);
     assert.match(first.AUTH_REALM_ID, /^[a-f0-9]{64}$/);

@@ -6,7 +6,7 @@
 
 ```text
 학생 브라우저
- ├─ https://kaneaigonan.github.io/assignment-alarm/ → GitHub Pages
+ ├─ https://insaeng0.github.io/assignment-alarm/ → GitHub Pages
  ├─ Google 학교 계정 → 서버에서 ID 토큰 검증
  └─ HTTPS API 주소 → HTTPS 터널 → 맥북 127.0.0.1:3100 → Express + MySQL
 ```
@@ -18,7 +18,7 @@ Pages에는 HTML/CSS/JS만 올립니다. `.env*`, 서버 코드, DB, 업로드 �
 Google Cloud Console → API 및 서비스 → 사용자 인증 정보에서 기존 **웹 애플리케이션** 클라이언트 ID를 확인합니다. 비밀키는 프런트에 넣지 않습니다. 승인된 JavaScript 원본에는 다음 값만 등록합니다.
 
 ```text
-https://kaneaigonan.github.io
+https://insaeng0.github.io
 ```
 
 `/assignment-alarm/` 경로는 Origin에 넣지 않습니다. 서버와 프런트는 같은 웹 클라이언트 ID를 사용합니다. 기존 학교 제한은 `bssm.hs.kr`이며 Google `email_verified`, `hd`, audience를 서버에서 검증합니다. 학교 Workspace 정책에서 앱 사용을 차단하면 해당 관리자의 허용이 필요합니다.
@@ -66,7 +66,7 @@ docker compose --env-file .env.mac up -d --build
 NODE_ENV=production
 TRUST_PROXY=1
 APP_ORIGIN=https://실제-API-호스트
-FRONTEND_ORIGIN=https://kaneaigonan.github.io
+FRONTEND_ORIGIN=https://insaeng0.github.io
 PAGES_AUTH_MODE=bearer
 AUTH_REALM_ID=설정스크립트가생성한64자리hex
 HOST_PORT=3100
@@ -78,7 +78,7 @@ COOKIE_SAMESITE=lax
 
 ## 4. GitHub Pages 배포
 
-저장소 `kaneaigonan/assignment-alarm`에서:
+저장소 `insaeng0/assignment-alarm`에서:
 
 1. Settings → Pages → Source를 **GitHub Actions**로 선택합니다.
 2. Settings → Secrets and variables → Actions → Variables에 `ASSIGNMENT_API_BASE_URL`을 만들고 실제 HTTPS API Origin을 넣습니다. 이 주소는 공개 설정이며 비밀키가 아닙니다. 같은 위치에 `ASSIGNMENT_AUTH_REALM`을 만들고 `.env.mac`의 `AUTH_REALM_ID`를 넣습니다. 이 값도 공개 식별자이며 터널 주소가 바뀌어도 유지해야 합니다.
@@ -99,7 +99,7 @@ COOKIE_SAMESITE=lax
 
 - 맥북·Docker·MySQL·터널이 실행 중이어야 합니다. 잠자기·전원 종료·인터넷 단절 시 Pages 화면은 열려도 로그인과 데이터 기능은 멈춥니다.
 - 기존 Railway DB·이미지는 GitHub 소스에 포함되지 않습니다. 이전 시 원본 백업을 보존하고 별도로 복구해야 합니다.
-- 같은 `kaneaigonan.github.io` Origin의 다른 프로젝트도 같은 출처이므로 해당 계정의 Pages 콘텐츠와 저장소 편집 권한을 신뢰할 수 있어야 합니다.
+- 같은 `insaeng0.github.io` Origin의 다른 프로젝트도 같은 출처이므로 해당 계정의 Pages 콘텐츠와 저장소 편집 권한을 신뢰할 수 있어야 합니다.
 - 자동 테스트의 DB·Google 응답은 대역을 사용합니다. 실제 Google/학교 정책·맥북 DB·외부 HTTPS 연결은 별도 실환경 검증 대상입니다.
 
 공식 문서: [GitHub Pages](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages), [Pages 워크플로](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages), [Google 로그인 설정](https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid), [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/), [CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS).

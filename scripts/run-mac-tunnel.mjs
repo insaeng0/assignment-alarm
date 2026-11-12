@@ -7,8 +7,8 @@ import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const FRONTEND_ORIGIN = 'https://kaneaigonan.github.io';
-export const REPOSITORY = 'kaneaigonan/assignment-alarm';
+export const FRONTEND_ORIGIN = 'https://insaeng0.github.io';
+export const REPOSITORY = 'insaeng0/assignment-alarm';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const execute = promisify(execFile);
 const invalid = message => Object.assign(new Error(message), { code: 'CONFIG_INVALID' });
