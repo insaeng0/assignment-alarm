@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const options = {};
 for (let i = 0; i < args.length; i += 2) {
-  if (!['--api-origin', '--google-client-id', '--frontend-origin', '--admin-email'].includes(args[i]) || !args[i + 1]) {
+  if (!['--api-origin', '--google-client-id', '--frontend-origin', '--admin-email', '--teacher-admins', '--host-port'].includes(args[i]) || !args[i + 1]) {
     console.error('사용법: node scripts/configure-mac.mjs --api-origin https://API주소 --google-client-id Google웹클라이언트ID --admin-email 운영자학교이메일 [--frontend-origin https://kaneaigonan.github.io]');
     process.exit(1);
   }
@@ -28,6 +28,8 @@ function httpsOrigin(value, label) {
 try {
   const apiOrigin = httpsOrigin(options['--api-origin'], 'API 주소');
   const frontendOrigin = httpsOrigin(options['--frontend-origin'] || 'https://kaneaigonan.github.io', '화면 주소');
+  const hostPort = options['--host-port'] || '3100';
+  if (!/^[0-9]+$/.test(hostPort) || Number(hostPort) < 1 || Number(hostPort) > 65535) throw new Error('호스트 포트는 1~65535 정수여야 합니다.');
   const envPath = path.join(root, '.env.mac');
   let existingText = '';
   try { existingText = await readFile(envPath, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -43,6 +45,8 @@ try {
   if (!admins.length || admins.some(email => !/^[a-z0-9._%+-]+@bssm\.hs\.kr$/.test(email))) {
     throw new Error('반 소속을 승인할 운영자 학교 이메일이 필요합니다. --admin-email 이름@bssm.hs.kr 을 지정하세요. 최초 가입자를 자동으로 관리자로 지정하지 않습니다.');
   }
+  const teacherAdmins = options['--teacher-admins'] || existing.ALLOW_TEACHER_NUMBER_ADMINS || 'false';
+  if (!['true', 'false'].includes(teacherAdmins)) throw new Error('--teacher-admins에는 true 또는 false만 지정하세요.');
   // Preserve generated secrets across runs so changing the tunnel URL never resets the DB.
   const secret = (key, bytes = 32) => existing[key] || randomBytes(bytes).toString('hex');
   const values = {
@@ -52,11 +56,13 @@ try {
     MYSQL_USER: existing.MYSQL_USER || 'assignment_user',
     MYSQL_PASSWORD: secret('MYSQL_PASSWORD'),
     JWT_SECRET: secret('JWT_SECRET', 48),
-    NODE_ENV: 'production', TRUST_PROXY: '1', PORT: '3000',
+    NODE_ENV: 'production', TRUST_PROXY: '1', PORT: '3000', HOST_PORT: hostPort,
+    COMPOSE_PROJECT_NAME: 'assignment-alarm-mac', ASSIGNMENT_CONTAINER_PREFIX: 'assignment-mac',
     APP_ORIGIN: apiOrigin, FRONTEND_ORIGIN: frontendOrigin,
     PAGES_AUTH_MODE: 'bearer', COOKIE_SAMESITE: 'lax',
     GOOGLE_CLIENT_ID: clientId,
     ADMIN_GOOGLE_EMAILS: [...new Set(admins)].join(','),
+    ALLOW_TEACHER_NUMBER_ADMINS: teacherAdmins,
     ENABLE_ASSIGNMENT_IMAGE_UPLOADS: 'true',
     ASSIGNMENT_IMAGE_MAX_STORAGE_MB: existing.ASSIGNMENT_IMAGE_MAX_STORAGE_MB || '512'
   };

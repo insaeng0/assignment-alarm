@@ -3,7 +3,7 @@ services:
     build:
       context: ./mysql
       dockerfile: Dockerfile
-    container_name: assignment-mysql
+    container_name: ${ASSIGNMENT_CONTAINER_PREFIX:-assignment}-mysql
     expose:
       - "3306"
     environment:
@@ -34,9 +34,9 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
-    container_name: assignment-web
+    container_name: ${ASSIGNMENT_CONTAINER_PREFIX:-assignment}-web
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${HOST_PORT:-3000}:3000"
     volumes:
       - ./web/src:/app/src:ro
       - assignment-images:/app/uploads/assignment-images
@@ -62,6 +62,7 @@ services:
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
       ADMIN_GOOGLE_EMAILS: ${ADMIN_GOOGLE_EMAILS:-}
+      ALLOW_TEACHER_NUMBER_ADMINS: ${ALLOW_TEACHER_NUMBER_ADMINS:-false}
       ADMIN_EXCLUDED_GOOGLE_EMAILS: ${ADMIN_EXCLUDED_GOOGLE_EMAILS:-}
       DB_HOST: mysql
       DB_PORT: 3306

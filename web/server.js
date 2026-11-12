@@ -28,6 +28,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || null;
 // const GEMINI_CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || 'gemini-3.5-flash';
 // const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
 const GOOGLE_ALLOWED_DOMAIN = 'bssm.hs.kr';
+const ALLOW_TEACHER_NUMBER_ADMINS = process.env.ALLOW_TEACHER_NUMBER_ADMINS === 'true';
 const ADMIN_GOOGLE_EMAILS = Array.from(new Set(
   String(
     process.env.ADMIN_GOOGLE_EMAILS
@@ -720,7 +721,8 @@ function normalizeBooleanFlag(value) {
 function isAdminEmail(email) {
   const normalized = String(email || '').trim().toLowerCase();
   if (ADMIN_EXCLUDED_GOOGLE_EMAILS.includes(normalized)) return false;
-  return ADMIN_GOOGLE_EMAILS.includes(normalized);
+  return ADMIN_GOOGLE_EMAILS.includes(normalized)
+    || (ALLOW_TEACHER_NUMBER_ADMINS && /^teacher[0-9]+@bssm\.hs\.kr$/.test(normalized));
 }
 
 function isAdminUser(user) {
@@ -1311,22 +1313,11 @@ async function seedAdminAccount(conn) {
     );
   }
 
-  // Google 관리자 권한은 검증된 이메일의 명시 허용 목록으로만 결정합니다.
-  await conn.execute('UPDATE users SET is_admin = 0 WHERE google_sub IS NOT NULL');
-
-  if (ADMIN_GOOGLE_EMAILS.length > 0) {
-    const targetAdminEmails = ADMIN_GOOGLE_EMAILS.filter(email => !ADMIN_EXCLUDED_GOOGLE_EMAILS.includes(email));
-    if (targetAdminEmails.length > 0) {
-      const placeholders = targetAdminEmails.map(() => '?').join(', ');
-      const [googleRows] = await conn.execute(
-        `SELECT user_id, google_email FROM users WHERE google_email IN (${placeholders})`,
-        targetAdminEmails
-      );
-      for (const row of googleRows) {
-        await conn.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', [row.user_id]);
-        console.log(`Admin account synced by email: ${row.google_email}`);
-      }
-    }
+  // Only previously verified Google identities participate in this policy.
+  // Explicit exclusions take precedence over both the list and the optional rule.
+  const [googleRows] = await conn.execute('SELECT user_id, google_email FROM users WHERE google_sub IS NOT NULL');
+  for (const row of googleRows) {
+    await conn.execute('UPDATE users SET is_admin = ? WHERE user_id = ?', [isAdminEmail(row.google_email) ? 1 : 0, row.user_id]);
   }
 
   if (!ADMIN_NAME || !ADMIN_PASSWORD) return;

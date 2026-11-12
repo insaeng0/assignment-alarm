@@ -28,13 +28,15 @@ class FakeGoogleClient {
   async verifyIdToken({ audience, idToken }) {
     assert.equal(audience, 'test-client');
     const id = /^user-(\d+)$/.exec(idToken)?.[1];
-    return { getPayload: () => ({ sub: id ? `student-${id}-sub` : 'student-sub', email: `student${id || ''}@bssm.hs.kr`, email_verified: true, hd: idToken === 'wrong-domain' ? 'evil.example' : 'bssm.hs.kr', name: '학생' }) };
+    const email = idToken.startsWith('email:') ? idToken.slice(6) : `student${id || ''}@bssm.hs.kr`;
+    return { getPayload: () => ({ sub: id ? `student-${id}-sub` : 'student-sub', email, email_verified: true, hd: idToken === 'wrong-domain' ? 'evil.example' : 'bssm.hs.kr', name: '학생' }) };
   }
 }
 function loadApp(overrides = {}) {
   const settings = {
     NODE_ENV: 'production', JWT_SECRET: secret, DB_USER: 'test', DB_PASSWORD: 'test',
     GOOGLE_CLIENT_ID: 'test-client', APP_ORIGIN: 'https://legacy.example', FRONTEND_ORIGIN: frontend,
+    ALLOW_TEACHER_NUMBER_ADMINS: 'false', ADMIN_GOOGLE_EMAILS: '', ADMIN_EXCLUDED_GOOGLE_EMAILS: '',
     COOKIE_SAMESITE: 'lax', PAGES_AUTH_MODE: 'cookie', PAGES_ACCESS_MAX_SESSIONS: '5000', TRUST_PROXY: 'loopback', ASSIGNMENT_IMAGE_DIR: imageRoot, ...overrides
   };
   const previous = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]));
@@ -95,6 +97,19 @@ test('configured frontend gets credentialed CORS and strict preflight including 
       assert.equal(invalid.status, 403);
       assert.equal(invalid.headers.get('access-control-allow-methods'), null);
     }
+  });
+});
+
+test('optional teacher-number administrators match only exact verified school addresses and exclusions win', async () => {
+  await serve(loadApp({ ALLOW_TEACHER_NUMBER_ADMINS: 'true', ADMIN_GOOGLE_EMAILS: 'owner@bssm.hs.kr', ADMIN_EXCLUDED_GOOGLE_EMAILS: 'teacher99@bssm.hs.kr' }), async base => {
+    for (const [email, expected] of [['teacher1@bssm.hs.kr', 1], ['teacher001@bssm.hs.kr', 1], ['owner@bssm.hs.kr', 1], ['teacher99@bssm.hs.kr', 0], ['studentteacher1@bssm.hs.kr', 0], ['teacher@bssm.hs.kr', 0], ['teacher1extra@bssm.hs.kr', 0]]) {
+      assert.equal((await login(base, 'email:' + email)).data.user.is_admin, expected, email);
+    }
+    const foreign = await fetch(base + '/api/auth/google', options({ method: 'POST', body: { credential: 'email:teacher1@evil.example' } }));
+    assert.equal(foreign.status, 401);
+  });
+  await serve(loadApp(), async base => {
+    assert.equal((await login(base, 'email:teacher1@bssm.hs.kr')).data.user.is_admin, 0);
   });
 });
 

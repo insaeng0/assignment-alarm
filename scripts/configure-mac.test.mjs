@@ -35,13 +35,16 @@ test('Mac setup keeps secrets private and preserves DB passwords when API URL ch
   try {
     await mkdir(path.join(root, 'scripts'));
     await copyFile(script, path.join(root, 'scripts/configure-mac.mjs'));
-    const run = api => execFileSync(process.execPath, ['scripts/configure-mac.mjs', '--api-origin', api, '--google-client-id', clientId, '--admin-email', 'operator@bssm.hs.kr'], { cwd: root, encoding: 'utf8' });
+    const run = api => execFileSync(process.execPath, ['scripts/configure-mac.mjs', '--api-origin', api, '--google-client-id', clientId, '--admin-email', 'operator@bssm.hs.kr', '--teacher-admins', 'true'], { cwd: root, encoding: 'utf8' });
     const firstOutput = run('https://first.example.com');
     const envPath = path.join(root, '.env.mac');
     const first = parseEnv(await readFile(envPath, 'utf8'));
     assert.equal((await stat(envPath)).mode & 0o777, 0o600);
     assert.equal(first.PAGES_AUTH_MODE, 'bearer');
     assert.equal(first.ADMIN_GOOGLE_EMAILS, 'operator@bssm.hs.kr');
+    assert.equal(first.ALLOW_TEACHER_NUMBER_ADMINS, 'true');
+    assert.equal(first.HOST_PORT, '3100');
+    assert.equal(first.ASSIGNMENT_CONTAINER_PREFIX, 'assignment-mac');
     assert.equal(first.FRONTEND_ORIGIN, 'https://kaneaigonan.github.io');
     assert.equal(first.COOKIE_SAMESITE, 'lax');
     assert.match(first.JWT_SECRET, /^[a-f0-9]{96}$/);
