@@ -74,6 +74,7 @@ test('student and student-admin completion permission is confined to their own c
     assert.equal(app.run('canCompleteAssignment(API.getUser(), assignments[1])'), true);
     assert.equal(app.run('canCompleteAssignment(API.getUser(), assignments[2])'), false);
     assert.equal(app.run('canCompleteAssignment(API.getUser(), assignments[3])'), false);
+    if (is_admin) app.run("adminGradeFilter = 'all'; adminClassFilter = 'all'");
     app.run(`openModal('${day}')`);
     const html = app.nodes.get('taskList').innerHTML;
     assert.match(html, /modal-submit-toggle" data-id="1"/);
@@ -91,6 +92,8 @@ test('teacher or missing completion privilege never exposes personal completion 
     assert.ok(!app.nodes.get('taskList').innerHTML.includes('modal-submit-toggle'));
     assert.equal(app.nodes.get('progressPercent').textContent, '—');
     assert.match(app.nodes.get('progressDescription').textContent, /사용하지 않습니다/);
+    assert.equal(app.nodes.get('adminGradeFilter').value, 'all');
+    assert.equal(app.nodes.get('adminClassFilter').value, 'all');
   }
 });
 
@@ -122,7 +125,7 @@ test('admin personal progress and completion filters exclude other classes even 
   assert.ok(!app.nodes.get('taskList').innerHTML.includes('null반'));
   assert.deepEqual(Array.from(app.run("taskFilter = 'done'; getMatchingAssignments().map(task => task.assignment_id)")), [2]);
   assert.deepEqual(Array.from(app.run("taskFilter = 'pending'; getMatchingAssignments().map(task => task.assignment_id)")), [1]);
-  assert.deepEqual(Array.from(app.run("taskFilter = 'all'; getMatchingAssignments().map(task => task.assignment_id)")), [1, 2, 3, 4]);
+  assert.deepEqual(Array.from(app.run("taskFilter = 'all'; getMatchingAssignments().map(task => task.assignment_id)")), [1, 2]);
   app.run("adminGradeFilter = '2'; adminClassFilter = '2'; renderCalendar()");
   assert.equal(app.nodes.get('progressCount').textContent, '0 / 0개 완료');
   assert.match(app.nodes.get('upcomingList').innerHTML, /내 반 과제가 없어요/);
@@ -133,6 +136,51 @@ test('admin class filters retain grade-wide assignments that also apply to the s
   assert.deepEqual(Array.from(app.run("adminGradeFilter = '1'; adminClassFilter = '2'; getVisibleAssignments().map(task => task.assignment_id)")), [1, 2]);
   assert.deepEqual(Array.from(app.run("adminClassFilter = '3'; getVisibleAssignments().map(task => task.assignment_id)")), [2, 3]);
   assert.deepEqual(Array.from(app.run("taskFilter = 'done'; getMatchingAssignments().map(task => task.assignment_id)")), [2]);
+});
+
+test('student admins initially see their own class and grade-wide tasks, including cached first paint', async () => {
+  const identity = deferred();
+  const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: '1', class_number: '2' }, fixtures(), { cached: fixtures(), ensureUser: () => identity.promise, skipLoad: true });
+  assert.equal(app.nodes.get('adminGradeFilter').value, '1');
+  assert.equal(app.nodes.get('adminClassFilter').value, '2');
+  assert.deepEqual(Array.from(app.run('getVisibleAssignments().map(task => task.assignment_id)')), [1, 2]);
+  const html = app.nodes.get('calendarBody').innerHTML;
+  assert.ok(html.includes('내 반 과제'));
+  assert.ok(html.includes('학년 공통 과제'));
+  assert.ok(!html.includes('다른 반 과제'));
+  assert.ok(!html.includes('다른 학년 과제'));
+  identity.resolve(null);
+});
+
+test('student admins can switch to other classes or all and a same-user refresh preserves that choice', async () => {
+  const user = { id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 };
+  const app = await calendar(user);
+  app.listeners.get('adminClassFilter:change')({ target: { value: '3' } });
+  assert.deepEqual(Array.from(app.run('getVisibleAssignments().map(task => task.assignment_id)')), [2, 3]);
+  app.run('initAdminFilters(API.getUser())');
+  await app.run('loadAssignments()');
+  assert.equal(app.nodes.get('adminClassFilter').value, '3');
+  assert.deepEqual(Array.from(app.run('getVisibleAssignments().map(task => task.assignment_id)')), [2, 3]);
+  app.listeners.get('adminGradeFilter:change')({ target: { value: 'all' } });
+  assert.equal(app.nodes.get('adminClassFilter').value, 'all');
+  assert.deepEqual(Array.from(app.run('getVisibleAssignments().map(task => task.assignment_id)')), [1, 2, 3, 4]);
+});
+
+test('account, class and role changes reset the default without carrying a previous admin filter', async () => {
+  const user = { id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 };
+  const app = await calendar(user);
+  app.run("adminGradeFilter = 'all'; adminClassFilter = 'all'");
+  Object.assign(user, { id: 20, grade: 2, class_number: 3 });
+  await app.run('loadAssignments()');
+  assert.equal(app.nodes.get('adminGradeFilter').value, '2');
+  assert.equal(app.nodes.get('adminClassFilter').value, '3');
+  user.can_complete_assignments = false;
+  await app.run('loadAssignments()');
+  assert.equal(app.nodes.get('adminGradeFilter').value, 'all');
+  assert.equal(app.nodes.get('adminClassFilter').value, 'all');
+  user.is_admin = false;
+  await app.run('loadAssignments()');
+  assert.equal(app.nodes.get('adminCalendarFilter').classList.contains('show'), false);
 });
 
 test('student-admin checkbox saves their own completion and keeps the class in updated metadata', async () => {

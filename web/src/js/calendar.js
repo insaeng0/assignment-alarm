@@ -30,7 +30,11 @@ function calendarViewScope(user = API.getUser()) {
 }
 function synchronizeViewScope(user = API.getUser()) {
   const nextScope = calendarViewScope(user);
-  if (!viewScopeInitialized) { viewScopeInitialized = true; localViewScope = nextScope; return false; }
+  if (!viewScopeInitialized) {
+    viewScopeInitialized = true; localViewScope = nextScope;
+    initAdminFilters(user, true);
+    return false;
+  }
   if (nextScope === localViewScope) return false;
   localViewScope = nextScope;
   assignments = []; assignmentsLoaded = false; assignmentsLoading = false; assignmentsError = false;
@@ -39,6 +43,7 @@ function synchronizeViewScope(user = API.getUser()) {
   previousFocus = null;
   if (modalDate) closeModal();
   document.getElementById('taskList').innerHTML = '';
+  initAdminFilters(user, true);
   // The scope is already bound before rendering, so this cannot recurse again.
   renderCalendar(false);
   return true;
@@ -197,9 +202,18 @@ async function loadAssignments(user = API.getUser()) {
   }
 }
 
-function initAdminFilters(user) {
+function initAdminFilters(user, resetToDefault = false) {
+  if (resetToDefault) {
+    const grade = Number(user?.grade);
+    const classNumber = Number(user?.class_number);
+    const ownClass = user?.is_admin === true && user.can_complete_assignments === true
+      && Number.isInteger(grade) && grade >= 1 && grade <= 3
+      && Number.isInteger(classNumber) && classNumber >= 1 && classNumber <= 4;
+    adminGradeFilter = ownClass ? String(grade) : 'all';
+    adminClassFilter = ownClass ? String(classNumber) : 'all';
+  }
+  document.getElementById('adminCalendarFilter').classList.toggle('show', Boolean(user?.is_admin));
   if (!user?.is_admin) return;
-  document.getElementById('adminCalendarFilter').classList.add('show');
   const grade = document.getElementById('adminGradeFilter');
   const classNumber = document.getElementById('adminClassFilter');
   grade.innerHTML = '<option value="all">전체 학년</option>' + Array.from({ length: 3 }, (_, i) => `<option value="${i + 1}">${i + 1}학년</option>`).join('');
