@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   profile_image_url VARCHAR(500) DEFAULT NULL,
   is_alarm_enabled TINYINT(1) DEFAULT 1,
   is_admin TINYINT(1) DEFAULT 0,
+  admin_mode_enabled TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY users_grade_class_idx (grade, class_number)
 );

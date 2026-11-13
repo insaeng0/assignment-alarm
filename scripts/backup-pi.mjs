@@ -13,9 +13,9 @@ import { createGunzip } from 'node:zlib';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REMOTE = 'ubuntu@10.150.1.0';
 const EXPORTS = [
-  { name: 'database.sql', command: 'assignment-backup-database-v1' },
-  { name: 'images.tar.gz', command: 'assignment-backup-images-v1', archive: 'images' },
-  { name: 'restore-config.tar.gz', command: 'assignment-backup-config-v1', archive: 'config' }
+  { name: 'database.sql', command: 'assignment-backup-database-v1', maxBytes: 64 * 1024 * 1024 },
+  { name: 'images.tar.gz', command: 'assignment-backup-images-v1', archive: 'images', maxBytes: 600 * 1024 * 1024 },
+  { name: 'restore-config.tar.gz', command: 'assignment-backup-config-v1', archive: 'config', maxBytes: 4 * 1024 * 1024 }
 ];
 const CONFIG_FILES = new Set([
   '.env.pi', '.runtime/tunnel-token', 'docker-compose.yml',
@@ -72,8 +72,13 @@ async function download(sshArguments, artifact, destination, signal) {
   signal.addEventListener('abort', stop, { once: true });
   const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 30 * 60_000);
   const environmentStream = createWriteStream(destination, { flags: 'wx', mode: 0o600 });
+  let receivedBytes = 0;
+  const limit = new Transform({ transform(chunk, encoding, callback) {
+    receivedBytes += chunk.length;
+    callback(receivedBytes > artifact.maxBytes ? fail('Export exceeds its size limit.') : null, chunk);
+  } });
   try {
-    const [, result] = await Promise.all([pipeline(child.stdout, environmentStream, { signal }), ended]);
+    const [, result] = await Promise.all([pipeline(child.stdout, limit, environmentStream, { signal }), ended]);
     if (spawnFailed || result.code !== 0 || result.childSignal || timedOut || signal.aborted)
       throw fail('Remote export did not finish successfully.');
     const handle = await fs.open(destination, 'r');
@@ -92,10 +97,13 @@ async function download(sshArguments, artifact, destination, signal) {
 class TarCheck extends Writable {
   constructor(kind) {
     super(); this.kind = kind; this.block = Buffer.alloc(512); this.used = 0;
+    this.bytes = 0; this.maxBytes = (kind === 'images' ? 768 : 4) * 1024 * 1024;
     this.remaining = 0; this.zeros = 0; this.entries = 0; this.found = new Set();
   }
   _write(chunk, encoding, callback) {
     try {
+      this.bytes += chunk.length;
+      if (this.bytes > this.maxBytes) throw fail('Expanded archive exceeds its size limit.');
       let offset = 0;
       while (offset < chunk.length) {
         if (this.remaining) {

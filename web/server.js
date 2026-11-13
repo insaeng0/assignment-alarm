@@ -9,6 +9,8 @@ const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 const { RefreshSessions, refreshSchema } = require('./lib/refresh-sessions');
+const { validateImageDimensions } = require('./lib/image-dimensions');
+const { databaseTimeOptions, installUtcDatabaseSessions } = require('./lib/database-time');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -30,6 +32,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || null;
 // const GEMINI_CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || 'gemini-3.5-flash';
 // const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
 const GOOGLE_ALLOWED_DOMAIN = 'bssm.hs.kr';
+const ADMIN_MODE_OWNER_EMAIL = String(process.env.ADMIN_MODE_OWNER_EMAIL || '').trim().toLowerCase();
 const ALLOW_TEACHER_NUMBER_ADMINS = process.env.ALLOW_TEACHER_NUMBER_ADMINS === 'true';
 const ADMIN_GOOGLE_EMAILS = Array.from(new Set(
   String(
@@ -127,7 +130,7 @@ const dbConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   charset: 'utf8mb4',
-  dateStrings: true,
+  ...databaseTimeOptions,
   ...(process.env.DB_SSL === 'true' ? { ssl: { rejectUnauthorized: true, ...(process.env.DB_SSL_CA ? { ca: process.env.DB_SSL_CA.replace(/\\n/g, '\n') } : {}) } } : {})
 };
 
@@ -140,9 +143,13 @@ if (!dbConfig.user || !dbConfig.password) {
 }
 
 const pool = mysql.createPool(dbConfig);
+installUtcDatabaseSessions(pool, { onError: () => console.error('Database UTC session initialization failed.') });
 const refreshSessions = new RefreshSessions({ pool, secret: JWT_SECRET, authRealm: AUTH_REALM_ID,
   maxFamilies: PAGES_ACCESS_MAX_SESSIONS, onRevoke: revokeFamilyAccess });
 if (AUTH_REALM_ID && !/^[a-f0-9]{64}$/.test(AUTH_REALM_ID)) throw new Error('AUTH_REALM_ID must be 64 lowercase hex characters.');
+if (ADMIN_MODE_OWNER_EMAIL && !/^[a-z0-9._%+-]+@bssm\.hs\.kr$/.test(ADMIN_MODE_OWNER_EMAIL)) {
+  throw new Error('ADMIN_MODE_OWNER_EMAIL must be one exact bssm.hs.kr school Google email, or empty.');
+}
 function revokeFamilyAccess(familyId) {
   for (const [jti, session] of pagesAccessSessions) if (session.familyId === familyId) pagesAccessSessions.delete(jti);
 }
@@ -223,6 +230,7 @@ const bootstrapSchema = [
     profile_image_url VARCHAR(500) DEFAULT NULL,
     is_alarm_enabled TINYINT(1) DEFAULT 1,
     is_admin TINYINT(1) DEFAULT 0,
+    admin_mode_enabled TINYINT(1) NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     KEY users_grade_class_idx (grade, class_number)
   )`,
@@ -745,7 +753,16 @@ function isAdminEmail(email) {
 }
 
 function isAdminUser(user) {
-  return normalizeBooleanFlag(user?.is_admin) === 1;
+  return normalizeBooleanFlag(user?.is_admin) === 1
+    && (!canSwitchAdminMode(user) || normalizeBooleanFlag(user.admin_mode_enabled ?? 1) === 1);
+}
+
+function canSwitchAdminMode(user) {
+  // Only a stored, verified Google identity with underlying admin eligibility
+  // may restore its own privileges. A mode flag alone never grants a role.
+  return Boolean(ADMIN_MODE_OWNER_EMAIL && user?.google_sub)
+    && normalizeBooleanFlag(user?.is_admin) === 1
+    && String(user?.google_email || '').trim().toLowerCase() === ADMIN_MODE_OWNER_EMAIL;
 }
 
 function canCompleteAssignments(user) {
@@ -760,7 +777,9 @@ function withClassApproval(user) {
   const { google_sub, ...publicUser } = user || {};
   // Compatibility for older clients. Class approval no longer gates access;
   // keep the stored legacy column untouched rather than deleting user data.
-  return { ...publicUser, is_class_approved: true, can_complete_assignments: canCompleteAssignments(user) };
+  return { ...publicUser, is_admin: isAdminUser(user) ? 1 : 0,
+    can_switch_admin_mode: canSwitchAdminMode(user), admin_mode_enabled: isAdminUser(user),
+    is_class_approved: true, can_complete_assignments: canCompleteAssignments(user) };
 }
 
 function isValidDateOnly(value) {
@@ -784,6 +803,7 @@ function decodeAssignmentImageDataUrl(dataUrl) {
     (mimeType === 'image/webp' && buffer.length >= 16 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP' && buffer.readUInt32LE(4) + 8 === buffer.length)
   );
   if (!isValidSignature) throw new Error('assignment-image-invalid');
+  validateImageDimensions(buffer, mimeType);
   return { buffer, extension: ASSIGNMENT_IMAGE_EXTENSIONS.get(mimeType) };
 }
 
@@ -935,7 +955,7 @@ async function verifyGoogleCredential(credential) {
 
 async function findUserByGoogleSub(googleSub) {
   const [rows] = await pool.execute(
-    'SELECT user_id, name, grade, class_number, class_approved, profile_image_url, is_alarm_enabled, is_admin, google_sub, google_email FROM users WHERE google_sub = ? LIMIT 1',
+    'SELECT user_id, name, grade, class_number, class_approved, profile_image_url, is_alarm_enabled, is_admin, admin_mode_enabled, google_sub, google_email FROM users WHERE google_sub = ? LIMIT 1',
     [googleSub]
   );
   return rows[0] || null;
@@ -1092,7 +1112,7 @@ async function authMiddleware(req, res, next) {
 }
 
 async function getCurrentUser(userId) {
-  const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [userId]);
+  const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin, admin_mode_enabled FROM users WHERE user_id = ?', [userId]);
   if (!rows[0]) return null;
   return { ...rows[0], is_class_approved: true, can_complete_assignments: canCompleteAssignments(rows[0]) };
 }
@@ -1244,6 +1264,14 @@ async function migrateSchema(conn) {
 
   if (adminColumns.length === 0) {
     await conn.execute('ALTER TABLE users ADD COLUMN is_admin TINYINT(1) DEFAULT 0 AFTER is_alarm_enabled');
+  }
+
+  const [adminModeColumns] = await conn.execute(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'admin_mode_enabled'`
+  );
+  if (adminModeColumns.length === 0) {
+    await conn.execute('ALTER TABLE users ADD COLUMN admin_mode_enabled TINYINT(1) NOT NULL DEFAULT 1 AFTER is_admin');
   }
 
   const [classApprovalColumns] = await conn.execute(
@@ -1451,7 +1479,8 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
       clearAuthRateLimit(req);
       return res.json({
         ...session,
-        user: {
+        user: withClassApproval({
+          ...existingUser,
           id: existingUser.user_id,
           name: existingUser.name,
           grade: existingUser.grade,
@@ -1460,8 +1489,10 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
           can_complete_assignments: canCompleteAssignments({ ...existingUser, is_admin: shouldGrantAdmin ? 1 : 0, google_sub: profile.google_sub, google_email: profile.google_email }),
           profile_image_url: profile.profile_image_url || existingUser.profile_image_url,
           is_alarm_enabled: existingUser.is_alarm_enabled,
-          is_admin: shouldGrantAdmin ? 1 : 0
-        }
+          is_admin: shouldGrantAdmin ? 1 : 0,
+          google_sub: profile.google_sub,
+          google_email: profile.google_email
+        })
       });
     }
 
@@ -1528,7 +1559,8 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
       clearAuthRateLimit(req);
       return res.json({
         ...session,
-        user: {
+        user: withClassApproval({
+          ...existingUser,
           id: existingUser.user_id,
           name: existingUser.name,
           grade: existingUser.grade,
@@ -1537,8 +1569,10 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
           can_complete_assignments: canCompleteAssignments({ ...existingUser, is_admin: shouldGrantAdmin ? 1 : 0, google_sub: decoded.profile.google_sub, google_email: decoded.profile.google_email }),
           profile_image_url: existingUser.profile_image_url,
           is_alarm_enabled: existingUser.is_alarm_enabled,
-          is_admin: shouldGrantAdmin ? 1 : 0
-        }
+          is_admin: shouldGrantAdmin ? 1 : 0,
+          google_sub: decoded.profile.google_sub,
+          google_email: decoded.profile.google_email
+        })
       });
     }
 
@@ -1565,7 +1599,7 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
     clearAuthRateLimit(req);
     return res.json({
       ...session,
-      user: {
+      user: withClassApproval({
         id: result.insertId,
         name: uniqueName,
         grade,
@@ -1574,8 +1608,11 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
         can_complete_assignments: canCompleteAssignments({ ...user, google_sub: decoded.profile.google_sub, google_email: decoded.profile.google_email }),
         profile_image_url: decoded.profile.profile_image_url,
         is_alarm_enabled: 1,
-        is_admin: isAdmin
-      }
+        is_admin: isAdmin,
+        admin_mode_enabled: 1,
+        google_sub: decoded.profile.google_sub,
+        google_email: decoded.profile.google_email
+      })
     });
   } catch (e) {
     if (e?.code === 'PAGES_SESSION_CAPACITY') {
@@ -1655,6 +1692,10 @@ app.post('/api/uploads/assignment-image', authMiddleware, assignmentImageRateLim
     } catch (error) {
       const message = error?.message === 'assignment-image-too-large'
         ? '이미지는 4MB 이하만 업로드할 수 있습니다.'
+        : error?.message === 'assignment-image-dimensions-too-large'
+          ? '이미지는 가로·세로 8192픽셀 이하, 전체 1600만 픽셀 이하만 업로드할 수 있습니다.'
+        : error?.message === 'assignment-image-animation-not-supported'
+          ? '움직이는 이미지는 첨부할 수 없습니다. PNG/JPG 또는 정적인 GIF/WebP를 사용해주세요.'
         : error?.message === 'assignment-image-type'
           ? 'PNG, JPG, WEBP, GIF 이미지만 업로드할 수 있습니다.'
           : '이미지 형식이 올바르지 않습니다.';
@@ -1677,7 +1718,7 @@ app.post('/api/uploads/assignment-image', authMiddleware, assignmentImageRateLim
 
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [req.user.id]);
+    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin, admin_mode_enabled FROM users WHERE user_id = ?', [req.user.id]);
     if (rows.length === 0) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     res.json(withClassApproval(rows[0]));
   } catch {
@@ -1686,13 +1727,44 @@ app.get('/api/auth/me', authMiddleware, async (req, res) => {
 });
 
 // Users
+app.put('/api/users/me/admin-mode', authMiddleware, async (req, res) => {
+  if (req.get('Origin') !== getAllowedFrontendOrigin(req)) return res.status(403).json({ error: '다른 사이트에서 보낸 요청은 허용하지 않습니다.' });
+  if (typeof req.body.enabled !== 'boolean' || Object.keys(req.body).some(key => key !== 'enabled')) {
+    return res.status(400).json({ error: '관리자 모드를 켜거나 끄는 값만 입력해주세요.' });
+  }
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    const [rows] = await connection.execute(
+      'SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin, admin_mode_enabled FROM users WHERE user_id = ? FOR UPDATE',
+      [req.user.id]
+    );
+    const owner = rows[0];
+    if (!canSwitchAdminMode(owner)) {
+      await connection.rollback();
+      return res.status(403).json({ error: '이 계정에서는 관리자 모드를 전환할 수 없습니다.' });
+    }
+    await connection.execute('UPDATE users SET admin_mode_enabled = ? WHERE user_id = ?', [req.body.enabled ? 1 : 0, req.user.id]);
+    await connection.commit();
+    clearResponseCaches({ users: true, assignments: true, messages: true, notifications: true });
+    return res.json({ success: true, user: withClassApproval({ ...owner, admin_mode_enabled: req.body.enabled ? 1 : 0 }) });
+  } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch {} }
+    logApiError('PUT /api/users/me/admin-mode failed', error, { userId: req.user?.id });
+    return res.status(500).json({ error: '모드를 변경하지 못했습니다. 다시 시도해주세요.' });
+  } finally {
+    connection?.release();
+  }
+});
+
 app.get('/api/users/:id', authMiddleware, async (req, res) => {
   try {
     const currentUser = await getCurrentUser(req.user.id);
     if (!currentUser) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     const requestedUserId = parseInteger(req.params.id);
     if (requestedUserId !== req.user.id && !isAdminUser(currentUser)) return res.status(403).json({ error: '권한이 없습니다.' });
-    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin FROM users WHERE user_id = ?', [req.params.id]);
+    const [rows] = await pool.execute('SELECT user_id, name, grade, class_number, class_approved, google_sub, google_email, profile_image_url, is_alarm_enabled, is_admin, admin_mode_enabled FROM users WHERE user_id = ?', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     res.json(withClassApproval(rows[0]));
   } catch {
@@ -1714,7 +1786,7 @@ app.get('/api/admin/users', authMiddleware, async (req, res) => {
     }
     const [[countRow]] = await pool.execute('SELECT COUNT(*) AS total FROM users');
     const [rows] = await pool.execute(
-      `SELECT user_id, name, google_sub, google_email, grade, class_number, class_approved, is_alarm_enabled, is_admin, created_at
+      `SELECT user_id, name, google_sub, google_email, grade, class_number, class_approved, is_alarm_enabled, is_admin, admin_mode_enabled, created_at
          FROM users
         ORDER BY is_admin DESC, grade ASC, class_number ASC, name ASC
         LIMIT ${safePageSize} OFFSET ${safeOffset}`
@@ -1924,7 +1996,7 @@ app.put('/api/admin/users/:id', authMiddleware, async (req, res) => {
         await connection.beginTransaction();
         const [rows] = await connection.execute('SELECT is_admin FROM users WHERE user_id = ? FOR UPDATE', [targetUserId]);
         if (!rows.length) { await connection.rollback(); return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' }); }
-        if (isAdminUser(rows[0])) { await connection.rollback(); return res.status(400).json({ error: '관리자 계정은 삭제할 수 없습니다.' }); }
+        if (normalizeBooleanFlag(rows[0].is_admin)) { await connection.rollback(); return res.status(400).json({ error: '관리자 계정은 삭제할 수 없습니다.' }); }
 
         await connection.execute('DELETE FROM user_assignments WHERE user_id = ?', [targetUserId]);
         await connection.execute('DELETE FROM user_assignments WHERE assignment_id IN (SELECT assignment_id FROM assignments WHERE created_by = ?)', [targetUserId]);
@@ -1954,7 +2026,7 @@ app.put('/api/admin/users/:id', authMiddleware, async (req, res) => {
       if (req.body.name !== undefined) {
         return res.status(400).json({ error: '이름은 변경할 수 없습니다.' });
       }
-      if (['grade', 'class_number', 'is_admin', 'can_complete_assignments', 'google_sub', 'google_email'].some(field => req.body[field] !== undefined)) {
+      if (['grade', 'class_number', 'is_admin', 'admin_mode_enabled', 'can_switch_admin_mode', 'can_complete_assignments', 'google_sub', 'google_email'].some(field => req.body[field] !== undefined)) {
         return res.status(403).json({ error: '소속과 계정 권한은 관리자만 변경할 수 있습니다.' });
       }
       if (req.body.is_alarm_enabled !== undefined) {
@@ -2049,6 +2121,7 @@ app.put('/api/assignments/:id', authMiddleware, assignmentWriteRateLimit, async 
     const user = await getCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     if (rows[0].created_by !== req.user.id && !isAdminUser(user)) return res.status(403).json({ error: '권한이 없습니다.' });
+    if (!isAdminUser(user) && (Number(rows[0].target_grade) !== Number(user.grade) || Number(rows[0].target_class) !== Number(user.class_number))) return res.status(403).json({ error: '현재 소속 반의 과제만 변경할 수 있습니다.' });
     const { title, content, due_date } = req.body;
     const currentAssignment = rows[0];
     const updates = [];
@@ -2102,6 +2175,9 @@ app.put('/api/assignments/:id', authMiddleware, assignmentWriteRateLimit, async 
       );
       if (!lockedRows.length) throw Object.assign(new Error('assignment-not-found'), { status: 404 });
       const lockedAssignment = lockedRows[0];
+      if (!isAdminUser(user) && (Number(lockedAssignment.target_grade) !== Number(user.grade) || Number(lockedAssignment.target_class) !== Number(user.class_number))) {
+        throw Object.assign(new Error('assignment-scope-changed'), { status: 403 });
+      }
       const effectiveGrade = isAdminUser(user) && req.body.target_grade !== undefined ? nextTargetGrade : lockedAssignment.target_grade;
       const effectiveClass = isAdminUser(user) && req.body.target_class !== undefined ? nextTargetClass : lockedAssignment.target_class;
       await connection.execute(`UPDATE assignments SET ${updates.join(', ')} WHERE assignment_id = ?`, values);
@@ -2118,6 +2194,7 @@ app.put('/api/assignments/:id', authMiddleware, assignmentWriteRateLimit, async 
     res.json({ success: true });
   } catch (error) {
     if (error?.status === 404) return res.status(404).json({ error: '과제를 찾을 수 없습니다.' });
+    if (error?.status === 403) return res.status(403).json({ error: '현재 소속 반의 과제만 변경할 수 있습니다.' });
     logApiError('PUT /api/assignments/:id failed', error, { assignmentId: req.params.id, actorUserId: req.user?.id });
     res.status(500).json({ error: '서버 오류가 발생했습니다.' });
   }
@@ -2162,12 +2239,17 @@ app.get('/api/assignments/:id/status', authMiddleware, async (req, res) => {
 
 app.delete('/api/assignments/:id', authMiddleware, assignmentWriteRateLimit, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT created_by FROM assignments WHERE assignment_id = ?', [req.params.id]);
+    const [rows] = await pool.execute('SELECT created_by, target_grade, target_class FROM assignments WHERE assignment_id = ?', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: '과제를 찾을 수 없습니다.' });
     const user = await getCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     if (rows[0].created_by !== req.user.id && !isAdminUser(user)) return res.status(403).json({ error: '권한이 없습니다.' });
-    await pool.execute('DELETE FROM assignments WHERE assignment_id = ?', [req.params.id]);
+    if (isAdminUser(user)) {
+      await pool.execute('DELETE FROM assignments WHERE assignment_id = ?', [req.params.id]);
+    } else {
+      const [result] = await pool.execute('DELETE FROM assignments WHERE assignment_id = ? AND created_by = ? AND target_grade = ? AND target_class = ?', [req.params.id, req.user.id, user.grade, user.class_number]);
+      if (!result.affectedRows) return res.status(403).json({ error: '현재 소속 반의 과제만 삭제할 수 있습니다.' });
+    }
     clearResponseCaches({ assignments: true, notifications: true });
     res.json({ success: true });
   } catch (error) {
@@ -2390,7 +2472,12 @@ app.delete('/api/messages/:id', authMiddleware, assignmentWriteRateLimit, async 
     const user = await getCurrentUser(req.user.id);
     if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
     if (rows[0].sender_id !== req.user.id && !isAdminUser(user)) return res.status(403).json({ error: '권한이 없습니다.' });
-    await pool.execute('DELETE FROM messages WHERE message_id = ?', [req.params.id]);
+    if (isAdminUser(user)) {
+      await pool.execute('DELETE FROM messages WHERE message_id = ?', [req.params.id]);
+    } else {
+      const [result] = await pool.execute('DELETE FROM messages WHERE message_id = ? AND sender_id = ? AND target_grade = ? AND (target_class IS NULL OR target_class = ?)', [req.params.id, req.user.id, user.grade, user.class_number]);
+      if (!result.affectedRows) return res.status(403).json({ error: '현재 소속 학년·반의 공지만 삭제할 수 있습니다.' });
+    }
     clearResponseCaches({ messages: true, notifications: true });
     res.json({ success: true });
   } catch (error) {

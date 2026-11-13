@@ -10,7 +10,7 @@ const secret = 'test-session-signing-key-with-at-least-32-bytes';
 const imageRoot = path.join(os.tmpdir(), `assignment-alarm-tests-${process.pid}`);
 Object.assign(process.env, {
   NODE_ENV: 'test', GEMINI_API_KEY: 'disabled-test-provider', JWT_SECRET: secret, DB_USER: 'test', DB_PASSWORD: 'test',
-  GOOGLE_CLIENT_ID: 'test-client', ADMIN_GOOGLE_EMAILS: 'approved@bssm.hs.kr',
+  GOOGLE_CLIENT_ID: 'test-client', ADMIN_GOOGLE_EMAILS: 'approved@bssm.hs.kr,26_40@bssm.hs.kr', ADMIN_MODE_OWNER_EMAIL: '26_40@bssm.hs.kr',
   APP_ORIGIN: 'https://assignment.example', ASSIGNMENT_IMAGE_DIR: imageRoot,
   ENABLE_ASSIGNMENT_IMAGE_UPLOADS: 'true', ASSIGNMENT_IMAGE_MAX_STORAGE_MB: '1', DB_SSL: 'true', DB_SSL_CA: 'test\\ncertificate'
 });
@@ -32,11 +32,14 @@ let calendarReadFixtures = null;
 let rosterFixtures = null;
 let assignmentWriteFails = false;
 let userDeletionFails = false;
+let modeWriteFails = false;
+let deletedScope = { target_grade: 1, target_class: 1 };
 const transactionCalls = [];
 let assignmentOwner = 1;
 let initiallyReadScope = { target_grade: 2, target_class: 2 };
 let lockedScope = { target_grade: 2, target_class: 2 };
 const fakePool = {
+  on() { return this; },
   async execute(sql, params = []) {
     queries.push({ sql, params });
     if (sql === 'SELECT 1') {
@@ -50,6 +53,7 @@ const fakePool = {
     if (sql.startsWith('UPDATE users SET is_admin')) return [{ affectedRows: 1 }];
     if (sql.startsWith('UPDATE users SET google_email')) return [{ affectedRows: 1 }];
     if (sql.startsWith('UPDATE users SET ')) {
+      if (sql.startsWith('UPDATE users SET admin_mode_enabled') && modeWriteFails) throw new Error('test mode write failure');
       const target = users.get(Number(params.at(-1)));
       const fields = sql.slice('UPDATE users SET '.length, sql.indexOf(' WHERE')).split(', ').map(field => field.split(' ')[0]);
       fields.forEach((field, index) => { if (target) target[field] = params[index]; });
@@ -71,6 +75,10 @@ const fakePool = {
     }
     if (sql.includes('FROM users') && sql.includes('ORDER BY is_admin')) return [[...users.values()]];
     if (sql.startsWith('SELECT created_by, target_grade, target_class FROM assignments')) return [[{ created_by: assignmentOwner, ...initiallyReadScope }]];
+    if (sql.startsWith('SELECT sender_id FROM messages')) return [[{ sender_id: assignmentOwner }]];
+    if (sql.startsWith('DELETE FROM assignments WHERE assignment_id = ? AND') || sql.startsWith('DELETE FROM messages WHERE message_id = ? AND')) {
+      return [{ affectedRows: Number(Number(params[2]) === deletedScope.target_grade && Number(params[3]) === deletedScope.target_class) }];
+    }
     if (sql.startsWith('SELECT target_grade, target_class FROM assignments')) return [lockedScope ? [lockedScope] : []];
     if (sql.startsWith('INSERT INTO assignments')) return [{ insertId: 42 }];
     if (sql.startsWith('INSERT INTO messages')) return [{ insertId: 71 }];
@@ -87,7 +95,7 @@ const fakePool = {
 class FakeGoogleClient {
   async verifyIdToken({ idToken, audience }) {
     assert.equal(audience, 'test-client');
-    const local = idToken === 'approved' ? 'approved' : idToken === 'teacher' ? 'studentteacher' : 'attacker';
+    const local = idToken === 'owner' ? '26_40' : idToken === 'approved' ? 'approved' : idToken === 'teacher' ? 'studentteacher' : 'attacker';
     return { getPayload: () => ({ sub: `${local}-sub`, email: `${local}@bssm.hs.kr`, email_verified: true, hd: idToken === 'wrong-hd' ? 'other.example' : idToken === 'missing-hd' ? undefined : 'bssm.hs.kr', name: '기존 관리자 이름' }) };
   }
 }
@@ -139,6 +147,8 @@ test('public config disables chatbot even with a provider key and supports TLS d
   assert.equal(data.imagesEnabled, true);
   assert.equal(dbOptions.ssl.rejectUnauthorized, true);
   assert.equal(dbOptions.ssl.ca, 'test\ncertificate');
+  assert.equal(dbOptions.timezone, 'Z');
+  assert.deepEqual(dbOptions.dateStrings, ['DATE']);
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
@@ -214,6 +224,94 @@ test('user/profile/admin/completion endpoints enforce ownership and current data
   assert.equal((await request('/api/user-assignments', { method: 'PUT', body: { assignment_id: 42, is_completed: 'not-a-boolean' }, token: session() })).response.status, 400);
   assert.equal((await request('/api/user-assignments', { method: 'PUT', body: { assignment_id: 42, is_completed: true }, token: session() })).response.status, 200);
   assert.equal((await request('/api/user-assignments', { method: 'PUT', body: { assignment_id: 42, is_completed: true }, token: session(2) })).response.status, 403);
+});
+
+test('only the configured verified owner can switch effective admin privileges and restore them without losing eligibility', async () => {
+  const owner = { user_id: 40, name: '소유자', grade: 1, class_number: 2, is_admin: 1, admin_mode_enabled: 1,
+    google_sub: '26_40-sub', google_email: '26_40@bssm.hs.kr', is_alarm_enabled: 1 };
+  users.set(40, owner);
+  const change = (enabled, extra = {}) => request('/api/users/me/admin-mode', { method: 'PUT', token: session(40),
+    headers: { Origin: 'https://assignment.example' }, body: { enabled, ...extra } });
+  try {
+    const off = await change(false);
+    assert.equal(off.response.status, 200);
+    assert.equal(off.data.user.is_admin, 0);
+    assert.equal(off.data.user.can_switch_admin_mode, true);
+    assert.equal(off.data.user.admin_mode_enabled, false);
+    assert.equal(off.data.user.google_sub, undefined);
+    assert.equal(owner.is_admin, 1, 'underlying admin eligibility is preserved');
+    for (const route of ['/api/admin/users', '/api/admin/assignments', '/api/admin/messages', '/api/users/3', '/api/assignments/42/status']) {
+      assert.equal((await request(route, { token: session(40) })).response.status, 403, route);
+    }
+    for (const route of ['/api/auth/me', '/api/users/40']) {
+      const profile = await request(route, { token: session(40) });
+      assert.equal(profile.data.is_admin, 0); assert.equal(profile.data.can_switch_admin_mode, true);
+    }
+    const deletion = await request('/api/admin/users/40', { token: session(2), method: 'DELETE' });
+    assert.equal(deletion.response.status, 400, 'owner off still cannot be deleted by another admin');
+    const on = await change(true);
+    assert.equal(on.data.user.is_admin, 1); assert.equal(on.data.user.admin_mode_enabled, true);
+    assert.equal((await request('/api/admin/users', { token: session(40) })).response.status, 200);
+    assert.equal((await change(true)).data.success, true, 'idempotent confirmed writes invalidate old role-dependent lists');
+    for (const enabled of [0, 1, 'true', null]) assert.equal((await change(enabled)).response.status, 400);
+    assert.equal((await change(false, { user_id: 2 })).response.status, 400);
+    for (const token of [session(1), session(2)]) {
+      assert.equal((await request('/api/users/me/admin-mode', { method: 'PUT', token, headers: { Origin: 'https://assignment.example' }, body: { enabled: true } })).response.status, 403);
+    }
+    assert.equal((await request('/api/users/me/admin-mode', { method: 'PUT', token: session(40), body: { enabled: false } })).response.status, 403);
+    assert.equal((await request('/api/users/me/admin-mode', { method: 'PUT', token: session(40), headers: { Origin: 'https://evil.example' }, body: { enabled: false } })).response.status, 403);
+    for (const field of ['admin_mode_enabled', 'can_switch_admin_mode']) {
+      assert.equal((await request('/api/users/40', { method: 'PUT', token: session(40), body: { [field]: true } })).response.status, 403);
+    }
+    modeWriteFails = true;
+    assert.equal((await change(false)).response.status, 500);
+    assert.equal(owner.admin_mode_enabled, 1);
+  } finally { users.delete(40); modeWriteFails = false; }
+});
+
+test('owner student mode survives both Google login paths and does not trust a matching unverified identity or ineligible role', async () => {
+  const owner = { user_id: 40, name: '소유자', grade: 1, class_number: 2, is_admin: 1, admin_mode_enabled: 0,
+    google_sub: '26_40-sub', google_email: '26_40@bssm.hs.kr', is_alarm_enabled: 1 };
+  users.set(40, owner); googleExisting = owner;
+  try {
+    const login = await request('/api/auth/google', { method: 'POST', body: { credential: 'owner' } });
+    assert.equal(login.data.user.is_admin, 0); assert.equal(login.data.user.can_switch_admin_mode, true);
+    const setupToken = jwt.sign({ type: 'google-setup', profile: { google_sub: owner.google_sub, google_email: owner.google_email, name: owner.name } }, secret,
+      { algorithm: 'HS256', issuer: 'assignment-alarm', audience: 'google-setup', expiresIn: '10m' });
+    const registered = await request('/api/auth/google/register', { method: 'POST', body: { setupToken, grade: 1, class_number: 2 } });
+    assert.equal(registered.data.user.is_admin, 0); assert.equal(owner.admin_mode_enabled, 0);
+    for (const change of [{ google_sub: null }, { is_admin: 0 }, { google_email: '26_400@bssm.hs.kr' }]) {
+      users.set(40, { ...owner, ...change });
+      const result = await request('/api/users/me/admin-mode', { method: 'PUT', token: session(40), headers: { Origin: 'https://assignment.example' }, body: { enabled: true } });
+      assert.equal(result.response.status, 403);
+    }
+  } finally { users.delete(40); googleExisting = null; }
+});
+
+test('student mode cannot change or delete formerly owned work outside its current class, including scope changes during a write', async () => {
+  const owner = { user_id: 40, name: '소유자', grade: 1, class_number: 2, is_admin: 1, admin_mode_enabled: 0, google_sub: '26_40-sub', google_email: '26_40@bssm.hs.kr' };
+  users.set(40, owner); assignmentOwner = 40;
+  try {
+    initiallyReadScope = { target_grade: 2, target_class: 2 }; deletedScope = { target_grade: 2, target_class: 2 };
+    assert.equal((await request('/api/assignments/42', { method: 'PUT', token: session(40), body: { title: '타반 수정' } })).response.status, 403);
+    assert.equal((await request('/api/assignments/42', { method: 'DELETE', token: session(40) })).response.status, 403);
+    assert.equal((await request('/api/messages/71', { method: 'DELETE', token: session(40) })).response.status, 403);
+    initiallyReadScope = { target_grade: 1, target_class: 2 }; lockedScope = { target_grade: 2, target_class: 2 };
+    const before = queries.length;
+    assert.equal((await request('/api/assignments/42', { method: 'PUT', token: session(40), body: { title: '경쟁 수정' } })).response.status, 403);
+    assert.ok(!queries.slice(before).some(({ sql }) => sql.startsWith('UPDATE assignments')));
+    lockedScope = initiallyReadScope; deletedScope = initiallyReadScope;
+    assert.equal((await request('/api/assignments/42', { method: 'PUT', token: session(40), body: { title: '우리 반 수정' } })).response.status, 200);
+    assert.equal((await request('/api/assignments/42', { method: 'DELETE', token: session(40) })).response.status, 200);
+    assert.equal((await request('/api/messages/71', { method: 'DELETE', token: session(40) })).response.status, 200);
+  } finally { users.delete(40); assignmentOwner = 1; initiallyReadScope = { target_grade: 2, target_class: 2 }; lockedScope = initiallyReadScope; deletedScope = { target_grade: 1, target_class: 1 }; }
+});
+
+test('schema migration adds an enabled-by-default admin mode without resetting roles or stored user data', async () => {
+  const statements = [];
+  await migrateSchema({ async execute(sql) { statements.push(sql); return [[]]; } });
+  assert.ok(statements.includes('ALTER TABLE users ADD COLUMN admin_mode_enabled TINYINT(1) NOT NULL DEFAULT 1 AFTER is_admin'));
+  assert.ok(!statements.some(sql => /^(?:DELETE|DROP TABLE|TRUNCATE|UPDATE users SET (?:is_admin|admin_mode_enabled))/.test(sql)));
 });
 
 test('integer and calendar date validation reject partial numbers and nonexistent dates', async () => {

@@ -13,15 +13,21 @@ const frontend = 'https://student.github.io';
 const users = new Map([[1, { user_id: 1, name: '학생', grade: 1, class_number: 1, class_approved: 1, is_admin: 0, is_alarm_enabled: 1, google_sub: 'student-sub' }]]);
 let existing = true;
 const fakePool = {
+  on() { return this; },
   async execute(sql, params = []) {
     if (sql.includes('FROM users WHERE google_sub')) {
       const id = /^student-(\d+)-sub$/.exec(params[0])?.[1];
       return [existing ? [users.get(Number(id) || 1)] : []];
     }
     if (sql.includes('FROM users WHERE user_id')) return [users.has(params[0]) ? [users.get(params[0])] : []];
+    if (sql.startsWith('UPDATE users SET admin_mode_enabled')) {
+      const user = users.get(params[1]); if (user) user.admin_mode_enabled = params[0];
+      return [{ affectedRows: user ? 1 : 0 }];
+    }
     if (sql.startsWith('INSERT INTO users')) { users.set(2, { ...users.get(1), user_id: 2, class_approved: 0 }); return [{ insertId: 2 }]; }
     return [{ affectedRows: 1 }];
   },
+  async getConnection() { return { execute: this.execute.bind(this), async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} }; },
   async end() {}
 };
 class FakeGoogleClient {
@@ -36,7 +42,7 @@ function loadApp(overrides = {}) {
   const settings = {
     NODE_ENV: 'production', JWT_SECRET: secret, DB_USER: 'test', DB_PASSWORD: 'test',
     GOOGLE_CLIENT_ID: 'test-client', APP_ORIGIN: 'https://legacy.example', FRONTEND_ORIGIN: frontend,
-    ALLOW_TEACHER_NUMBER_ADMINS: 'false', ADMIN_GOOGLE_EMAILS: '', ADMIN_EXCLUDED_GOOGLE_EMAILS: '',
+    ALLOW_TEACHER_NUMBER_ADMINS: 'false', ADMIN_GOOGLE_EMAILS: '', ADMIN_EXCLUDED_GOOGLE_EMAILS: '', ADMIN_MODE_OWNER_EMAIL: '',
     COOKIE_SAMESITE: 'lax', PAGES_AUTH_MODE: 'cookie', PAGES_ACCESS_MAX_SESSIONS: '5000', TRUST_PROXY: 'loopback', ASSIGNMENT_IMAGE_DIR: imageRoot, ...overrides
   };
   const previous = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]));
@@ -263,6 +269,40 @@ test('unsafe deployment configuration fails early with actionable errors', () =>
   assert.throws(() => loadApp({ NODE_ENV: 'test', PAGES_AUTH_MODE: 'bearer' }), /PAGES_AUTH_MODE=bearer/);
   assert.throws(() => loadApp({ FRONTEND_ORIGIN: '', PAGES_AUTH_MODE: 'bearer' }), /explicit HTTPS FRONTEND_ORIGIN/);
   assert.throws(() => loadApp({ PAGES_ACCESS_MAX_SESSIONS: '1000000' }), /PAGES_ACCESS_MAX_SESSIONS/);
+  assert.throws(() => loadApp({ ADMIN_MODE_OWNER_EMAIL: 'owner@evil.example' }), /ADMIN_MODE_OWNER_EMAIL/);
+});
+
+test('bearer owner mode is checked from durable state on every request and refresh, and disabled config never grants a switch', async () => {
+  const original = users.get(1);
+  const owner = { ...original, is_admin: 1, google_email: '26_40@bssm.hs.kr', admin_mode_enabled: 1 };
+  users.set(1, owner);
+  const { RefreshSessions } = require('../lib/refresh-sessions');
+  const rotate = RefreshSessions.prototype.rotate;
+  RefreshSessions.prototype.rotate = async () => ({ familyId: 'f'.repeat(64), userId: 1, refreshToken: 'f'.repeat(64)+'.'+'e'.repeat(64), refreshExpiresAt: new Date(Date.now()+60_000).toISOString() });
+  try {
+    await serve(loadApp({ PAGES_AUTH_MODE: 'bearer', AUTH_REALM_ID: 'a'.repeat(64), ADMIN_GOOGLE_EMAILS: owner.google_email, ADMIN_MODE_OWNER_EMAIL: owner.google_email }), async base => {
+      const token = (await login(base, 'email:' + owner.google_email)).data.accessToken;
+      const mode = enabled => fetch(`${base}/api/users/me/admin-mode`, options({ method: 'PUT', token, body: { enabled } }));
+      assert.equal((await mode(false)).status, 200); assert.equal(owner.is_admin, 1);
+      const me = await fetch(`${base}/api/auth/me`, options({ token }));
+      const profile = await me.json(); assert.equal(profile.is_admin, 0); assert.equal(profile.can_switch_admin_mode, true);
+      assert.equal((await fetch(`${base}/api/admin/users`, options({ token }))).status, 403);
+      const renewed = await fetch(`${base}/api/auth/refresh`, options({ method: 'POST', body: { refreshToken: 'opaque', requestId: 'd'.repeat(32) } }));
+      const session = await renewed.json();
+      assert.equal(renewed.status, 200); assert.equal(session.user.is_admin, 0); assert.equal(session.user.can_switch_admin_mode, true);
+      assert.equal(session.user.google_sub, undefined);
+      assert.equal((await mode(true)).status, 200); assert.equal(owner.admin_mode_enabled, 1);
+      owner.is_admin = 0;
+      assert.equal((await mode(true)).status, 403, 'a stale access token cannot recover revoked underlying admin eligibility');
+    });
+    owner.is_admin = 1; owner.admin_mode_enabled = 0;
+    await serve(loadApp(), async base => {
+      const me = await fetch(`${base}/api/auth/me`, options({ token: sessionToken() }));
+      const profile = await me.json(); assert.equal(profile.is_admin, 1); assert.equal(profile.can_switch_admin_mode, false);
+      const mode = await fetch(`${base}/api/users/me/admin-mode`, options({ method: 'PUT', token: sessionToken(), body: { enabled: true } }));
+      assert.equal(mode.status, 403);
+    });
+  } finally { users.set(1, original); RefreshSessions.prototype.rotate = rotate; }
 });
 
 test('remembered-session refresh and logout require the exact Pages Origin before reading credentials', async () => {

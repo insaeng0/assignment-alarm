@@ -35,6 +35,7 @@ API.initTheme();
       };
 
     let alarmOperation = null;
+    let adminModeOperation = null;
     const adminUserUpdates = new Map();
     const adminUserDrafts = new Map();
     const adminDeletes = { assignment: new Map(), message: new Map(), user: new Map() };
@@ -316,6 +317,7 @@ API.initTheme();
     async function loadProfile(userData = null) {
       const data = userData || API.getUser();
       if (!data || data.error) return;
+      renderAdminMode(data);
 
       document.getElementById('settingName').value = data.name;
       document.getElementById('settingClass').value = data.is_admin ? (data.can_complete_assignments ? `${data.grade}학년 ${data.class_number}반 · 학생 관리자` : '관리자 · 전체 학년/반 조회 가능') : `${data.grade}학년 ${data.class_number}반`;
@@ -351,10 +353,55 @@ API.initTheme();
         user.grade = data.grade;
         user.class_number = data.class_number;
         user.is_admin = API.normalizeFlag(data.is_admin);
+        user.can_switch_admin_mode = API.normalizeFlag(data.can_switch_admin_mode);
+        user.admin_mode_enabled = API.normalizeFlag(data.admin_mode_enabled);
         if (pendingAlarm) user.is_alarm_enabled = alarmOperation.newValue;
         API.setUser(user);
       }
     }
+
+    function renderAdminMode(user = API.getUser()) {
+      const eligible = API.normalizeFlag(user?.can_switch_admin_mode);
+      document.getElementById('adminModeSetting').hidden = !eligible;
+      const toggle = document.getElementById('adminModeToggle');
+      const enabled = API.normalizeFlag(user?.is_admin);
+      toggle.classList.toggle('on', enabled);
+      toggle.setAttribute('aria-checked', String(enabled));
+      toggle.disabled = Boolean(adminModeOperation) || !eligible;
+      toggle.setAttribute('aria-busy', String(Boolean(adminModeOperation)));
+      document.getElementById('adminModeHelp').textContent = adminModeOperation
+        ? '모드를 변경하고 있어요…'
+        : enabled ? '끄면 일반 학생 권한으로 이용하며, 여기서 다시 켤 수 있어요.' : '일반 학생 모드로 이용 중이에요. 관리자 모드를 다시 켤 수 있어요.';
+    }
+
+    document.getElementById('adminModeToggle').addEventListener('click', async () => {
+      const user = API.getUser();
+      if (adminModeOperation || !API.normalizeFlag(user?.can_switch_admin_mode)) return;
+      const operation = { scope: settingsScope(), id: user.id };
+      adminModeOperation = operation;
+      renderAdminMode(user);
+      try {
+        const result = await API.setAdminMode(!API.normalizeFlag(user.is_admin));
+        if (!result?.success) throw new Error(result?.error || '모드를 변경하지 못했습니다.');
+        // API installs the confirmed identity; never grant privileges locally.
+        if (Number(API.getUser()?.id) !== Number(operation.id)) return;
+        syncSettingsScope();
+        await loadProfile(API.getUser());
+        API.loadUserInfo();
+        const admin = API.normalizeFlag(API.getUser()?.is_admin);
+        for (const id of ['adminAssignmentSection', 'adminMessageSection', 'adminUserSection']) document.getElementById(id).style.display = admin ? 'block' : 'none';
+        if (admin) {
+          initAdminSelectors();
+          ensureAdminSectionLoaded('assignment', { force: true }).catch(() => {});
+        }
+        AppUI.toast(admin ? '관리자 모드로 변경했습니다.' : '일반 학생 모드로 변경했습니다.');
+      } catch (error) {
+        if (operation.scope === settingsScope()) AppUI.toast(error?.message || '모드를 변경하지 못했습니다.', true);
+      } finally {
+        if (adminModeOperation === operation) adminModeOperation = null;
+        renderAdminMode();
+      }
+    });
 
     function adminUserOptions(max, suffix, value) {
       return Array.from({ length: max }, (_, i) => {
@@ -514,7 +561,7 @@ API.initTheme();
           <div class="message-item">
             <div class="msg-header">
               <span class="msg-sender">${API.escapeHTML(message.sender_name)} ${badge}</span>
-              <span class="msg-time">${new Date(message.created_at).toLocaleString('ko-KR')}</span>
+              <span class="msg-time">${API.formatDateTime(message.created_at)}</span>
             </div>
             <div class="msg-content">${API.escapeHTML(message.content)}</div>
             <div class="msg-time" style="margin-top:6px">${message.type === 'grade' ? `${message.target_grade}학년` : `${message.target_grade}학년 ${message.target_class}반`}</div>
@@ -660,7 +707,7 @@ API.initTheme();
               <select aria-label="사용자 반" class="admin-class-select" ${saving ? 'disabled' : ''}>${adminUserOptions(4, '반', draft?.class_number ?? user.class_number)}</select>
             </div>
           </div>
-          <div class="admin-user-meta">생성일 ${new Date(user.created_at).toLocaleString('ko-KR')}</div>
+          <div class="admin-user-meta">생성일 ${API.formatDateTime(user.created_at)}</div>
           <div class="admin-user-actions">
             <button class="btn btn-primary btn-sm save-admin-user" ${saving ? 'disabled' : ''}>${saving ? '저장 중…' : '저장'}</button>
             ${admin ? '' : `<button class="btn btn-danger btn-sm delete-admin-user" ${saving ? 'disabled' : ''}>삭제</button>`}

@@ -63,6 +63,14 @@ Google OAuth 승인된 JavaScript 원본은 `https://insaeng0.github.io`를 유�
 
 GitHub 저장소 변수 `ASSIGNMENT_API_BASE_URL`에 고정 Worker origin을 넣고 Pages 워크플로를 실행합니다. `ASSIGNMENT_AUTH_REALM`은 기존 식별자를 유지합니다. 정확한 API 주소와 CSP가 함께 배포됩니다.
 
+## 소유자 계정의 관리자 모드
+
+서버 `.env.pi`의 `ADMIN_MODE_OWNER_EMAIL`에 모드를 전환할 학교 Google 계정 한 개를 지정합니다. 검증된 Google 계정이며 DB의 원래 관리자 자격이 있는 소유자만 설정 화면에서 관리자 모드를 끄거나 다시 켤 수 있습니다. 이 설정은 기존 관리자 목록을 대체하거나 새 관리자 자격을 부여하지 않습니다.
+
+학생 모드에서는 서버가 일반 학생의 학년·반 권한을 적용합니다. 원래 관리자 자격은 DB에 보존하므로 본인이 복귀할 수 있고, 다른 관리자가 이 계정을 일반 학생으로 오인해 삭제할 수 없습니다. 다른 계정이나 일반 프로필 수정 API로 모드를 바꾸는 요청은 거절합니다.
+
+기능 적용에는 최신 서버 코드·Compose 설정과 `ADMIN_MODE_OWNER_EMAIL`을 반영한 뒤 `docker compose --env-file .env.pi up -d --no-deps --build web` 실행이 필요합니다. 서버에 기능이 없거나 소유자가 설정되지 않았으면 전환 UI는 표시하지 않습니다. DB에는 `admin_mode_enabled` 컬럼만 추가하며 원래 역할과 자료는 보존합니다. 적용 전 Mac 백업을 완료하고 적용 후 본인 프로필·off/on·학생 범위를 확인합니다.
+
 ## 백업
 
 ### Mac에 보관하는 일일 백업

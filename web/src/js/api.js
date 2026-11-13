@@ -20,6 +20,8 @@ const API = {
   refreshPromise: null,
   trustedRefreshKey: null,
   logoutGeneration: 0,
+  profileRevision: 0,
+  adminModeRequest: null,
   getAuthRealm() {
     const realm = String(window.ASSIGNMENT_CONFIG?.authRealm || '').trim();
     if (!realm) return null;
@@ -109,10 +111,14 @@ const API = {
     if (config?.authMode !== 'bearer' || config.authRealm !== realm) throw Object.assign(new Error('로그인 서버의 식별자가 일치하지 않습니다.'), { code: 'AUTH_REALM_MISMATCH' });
     this.trustedRefreshKey = key;
   },
-  async installLoginSession(data, { expected = null, generation = this.logoutGeneration, logoutMarker = null } = {}) {
+  async installLoginSession(data, { expected = null, generation = this.logoutGeneration, logoutMarker = null, profileRevision = this.profileRevision, refreshUserId = null } = {}) {
     const access = { accessToken: data.accessToken, expiresAt: data.expiresAt, apiOrigin: this.getApiOrigin() };
     if (!this.validAccessSession(access)) throw new Error('API 서버의 로그인 응답을 확인해주세요.');
+    if (!expected && !this.normalizeUser(data.user)?.id) throw new Error('API 서버의 계정 응답을 확인해주세요.');
     const realm = this.getAuthRealm();
+    const accountChanged = () => profileRevision !== this.profileRevision
+      && String(refreshUserId || '') !== String(this.getUser()?.id || '');
+    if (expected && accountChanged()) return false;
     if (realm && data.refreshToken) {
       if (data.authRealm !== realm) throw Object.assign(new Error('로그인 서버의 식별자가 일치하지 않습니다.'), { code: 'AUTH_REALM_MISMATCH' });
       const record = { authRealm: realm, refreshToken: data.refreshToken, refreshExpiresAt: data.refreshExpiresAt, pendingRequestId: null,
@@ -120,10 +126,16 @@ const API = {
       if (generation !== this.logoutGeneration) return false;
       const saved = await this.saveRememberedSession(record, expected);
       if (!saved) return false;
+    } else if (realm && !expected) {
+      // A confirmed login without "remember me" replaces any previous account.
+      // Delete in one write transaction: an older refresh's compare-and-swap
+      // cannot repopulate the removed credential after this commits.
+      if (generation !== this.logoutGeneration) return false;
+      await this.deleteRememberedSession();
     }
-    if (generation !== this.logoutGeneration || (realm && data.refreshToken && !this.validRememberedSession({ authRealm: realm, refreshToken: data.refreshToken, refreshExpiresAt: data.refreshExpiresAt, logoutMarker: expected ? expected.logoutMarker || '' : logoutMarker === null ? this.storageGet('assignment-logout:' + realm) || '' : logoutMarker }))) return false;
+    if (generation !== this.logoutGeneration || (expected && accountChanged()) || (realm && data.refreshToken && !this.validRememberedSession({ authRealm: realm, refreshToken: data.refreshToken, refreshExpiresAt: data.refreshExpiresAt, logoutMarker: expected ? expected.logoutMarker || '' : logoutMarker === null ? this.storageGet('assignment-logout:' + realm) || '' : logoutMarker }))) return false;
     this.setToken(data.accessToken, data.expiresAt);
-    if (data.user) this.setUser(data.user);
+    if (data.user && profileRevision === this.profileRevision) this.setUser(data.user);
     return true;
   },
   async refreshRememberedSession() {
@@ -131,14 +143,21 @@ const API = {
     if (this.refreshPromise) return this.refreshPromise;
     const operation = async () => {
       const generation = this.logoutGeneration;
+      const profileRevision = this.profileRevision;
+      const refreshUserId = this.getUser()?.id || null;
+      const previousAccessToken = this.getToken();
+      const changedIdentity = () => generation !== this.logoutGeneration || profileRevision !== this.profileRevision
+        || previousAccessToken !== this.getToken();
+      const changedAccount = () => generation !== this.logoutGeneration || String(refreshUserId || '') !== String(this.getUser()?.id || '');
       let initial;
       try { initial = await this.readRememberedSession(); } catch { return { available: false }; }
       if (!initial) return { available: false };
       try {
         await this.trustRememberedBackend();
         for (let attempt = 0; attempt < 2; attempt++) {
-          if (generation !== this.logoutGeneration) return { available: false };
+          if (changedAccount()) return { available: false };
           const record = await this.prepareRememberedRefresh();
+          if (changedAccount()) return { available: false };
           if (!record) return { available: false };
           const response = await fetch(this.apiUrl('/api/auth/refresh').toString(), {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'omit', redirect: 'error',
@@ -146,22 +165,27 @@ const API = {
           });
           let data;
           try { data = await response.json(); } catch { throw new Error('로그인 유지 서버의 응답을 읽지 못했습니다.'); }
+          if (changedAccount()) return { available: false };
           if (response.status === 409 && data?.code === 'REFRESH_RACE') {
             const latest = await this.readRememberedSession();
+            if (changedAccount()) return { available: false };
             if (attempt === 0 && latest && latest.refreshToken !== record.refreshToken) continue;
             return { available: true, transient: true, error: '다른 탭에서 로그인 상태를 갱신하고 있습니다. 다시 시도해주세요.', code: 'REFRESH_RACE' };
           }
           if (response.status === 401) {
+            if (changedIdentity()) return { available: false };
             const removed = await this.deleteRememberedSession(record.refreshToken);
-            if (!removed && attempt === 0 && await this.readRememberedSession()) continue;
+            const latest = !removed && attempt === 0 ? await this.readRememberedSession() : null;
+            if (changedIdentity()) return { available: false };
+            if (latest) continue;
             this.clearToken(); this.clearUser();
             return { available: true, definitive: true, status: 401, error: '로그인이 만료되었습니다.' };
           }
           if (!response.ok) return { available: true, transient: true, status: response.status, error: data?.error || '로그인 유지 서버에 연결하지 못했습니다.' };
-          const installed = await this.installLoginSession(data, { expected: record, generation });
+          const installed = await this.installLoginSession(data, { expected: record, generation, profileRevision, refreshUserId });
           if (!installed) {
             const latest = await this.readRememberedSession();
-            if (generation === this.logoutGeneration && latest && attempt === 0) continue;
+            if (generation === this.logoutGeneration && profileRevision === this.profileRevision && latest && attempt === 0) continue;
             return { available: false };
           }
           return { available: true, refreshed: true };
@@ -429,15 +453,22 @@ const API = {
   setUser(u) {
     const prevUser = this.getUser();
     const user = this.normalizeUser(u);
-    if (prevUser && ['id', 'grade', 'class_number', 'is_admin', 'can_complete_assignments'].some(key => String(prevUser[key]) !== String(user?.[key]))) this.invalidateDataCache();
+    const scopeChanged = !prevUser || ['id', 'grade', 'class_number', 'is_admin', 'can_complete_assignments'].some(key => String(prevUser[key]) !== String(user?.[key]));
+    if (scopeChanged) {
+      this.profileRevision++;
+      this.invalidateDataCache();
+      this.clearProtectedImages();
+    }
     this.currentUser = user;
     this.storageSet('user', JSON.stringify(user));
     this.setCurrentUserFetchedAt();
-    if (!prevUser || String(prevUser.id) !== String(user?.id)) {
+    if (scopeChanged) {
       this.clearNotificationCache();
     }
   },
   clearUser() {
+    this.profileRevision++;
+    this.clearProtectedImages();
     this.invalidateDataCache();
     const hadUser = Boolean(this.getUser());
     this.currentUser = null;
@@ -550,10 +581,8 @@ const API = {
     if (!this.isSafeContentUrl(value)) return false;
     try {
       const url = this.resolveContentUrl(value);
-      if (url.origin === window.location.origin || url.origin === this.getApiOrigin()) {
-        return url.pathname.startsWith('/uploads/');
-      }
-      return true;
+      return url.origin === this.getApiOrigin() && !url.username && !url.password && !url.hash
+        && url.pathname.startsWith('/uploads/assignment-images/');
     } catch {
       return false;
     }
@@ -591,8 +620,9 @@ const API = {
     try {
       const bearer = this.getAuthMode() === 'bearer';
       const headers = {};
+      let token = null;
       if (bearer) {
-        let token = this.getToken();
+        token = this.getToken();
         if (!token && !retried) {
           const renewal = await this.refreshRememberedSession();
           if (renewal.transient) throw new Error(renewal.error);
@@ -601,13 +631,28 @@ const API = {
         if (!token) throw new Error('이미지를 보려면 다시 로그인해주세요.');
         headers.Authorization = 'Bearer ' + token;
       }
+      const generation = this.logoutGeneration;
+      const identity = this.userIdentity();
+      const revision = this.profileRevision;
+      const checkScope = () => {
+        if (signal?.aborted || generation !== this.logoutGeneration || identity !== this.userIdentity()
+          || revision !== this.profileRevision) {
+          throw Object.assign(new Error('로그인 상태가 바뀌어 이미지 요청을 취소했습니다.'), { code: 'AUTH_CHANGED' });
+        }
+      };
+      const checkIdentity = () => {
+        checkScope();
+        if (bearer && token !== this.getToken()) throw Object.assign(new Error('로그인 상태가 바뀌어 이미지 요청을 취소했습니다.'), { code: 'AUTH_CHANGED' });
+      };
       const response = await fetch(url.toString(), {
         method: 'GET', headers, credentials: bearer ? 'omit' : url.origin === window.location.origin ? 'same-origin' : 'include',
         redirect: 'error', signal: controller.signal
       });
+      checkIdentity();
       if (response.status === 401 && bearer && !retried) {
         this.clearToken();
         const renewal = await this.refreshRememberedSession();
+        checkScope();
         if (renewal.refreshed) return this.requestImage(value, { signal, retried: true });
         if (renewal.transient) throw new Error(renewal.error);
       }
@@ -619,12 +664,22 @@ const API = {
       }
       if (!response.ok) throw new Error('첨부 이미지를 불러오지 못했습니다.');
       const image = await response.blob();
+      checkIdentity();
       if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(image.type) || image.size > 4 * 1024 * 1024) throw new Error('지원하지 않는 첨부 이미지입니다.');
       return image;
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abort);
     }
+  },
+
+  clearProtectedImages() {
+    for (const [image, state] of this.protectedImageStates) {
+      state.controller.abort();
+      if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
+      image.removeAttribute('src');
+    }
+    this.protectedImageStates.clear();
   },
 
   initProtectedImages() {
@@ -642,15 +697,16 @@ const API = {
       document.querySelectorAll('img[data-protected-image-src]').forEach((image) => {
         if (this.protectedImageStates.has(image)) return;
         const source = image.getAttribute('data-protected-image-src');
-        const state = { source, controller: new AbortController(), objectUrl: null };
+        const state = { source, controller: new AbortController(), objectUrl: null, identity: this.userIdentity(), revision: this.profileRevision };
         this.protectedImageStates.set(image, state);
         this.requestImage(source, { signal: state.controller.signal }).then((blob) => {
-          if (!image.isConnected || this.protectedImageStates.get(image) !== state) return;
+          if (!image.isConnected || this.protectedImageStates.get(image) !== state
+            || state.identity !== this.userIdentity() || state.revision !== this.profileRevision) return;
           state.objectUrl = URL.createObjectURL(blob);
           image.src = state.objectUrl;
           image.removeAttribute('aria-busy');
         }).catch((error) => {
-          if (!image.isConnected || state.controller.signal.aborted) return;
+          if (!image.isConnected || state.controller.signal.aborted || this.protectedImageStates.get(image) !== state) return;
           image.removeAttribute('aria-busy');
           image.title = error?.message || '첨부 이미지를 불러오지 못했습니다.';
         });
@@ -691,6 +747,9 @@ const API = {
           const safeAlt = this.escapeHTML(imageAlt || '첨부 이미지');
           const protectedImage = this.getAuthMode() === 'bearer' && this.isProtectedImageUrl(imageUrl);
           parts.push(`<img class="assignment-inline-image" ${protectedImage ? 'data-protected-image-src' : 'src'}="${safeSrc}" alt="${safeAlt}" loading="lazy"${protectedImage ? ' aria-busy="true"' : ''}>`);
+        } else if (this.isSafeContentUrl(imageUrl)) {
+          const safeHref = this.escapeHTML(this.resolveContentUrl(imageUrl).toString());
+          parts.push(`<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${this.escapeHTML(imageAlt || '외부 이미지 열기')}</a>`);
         } else {
           parts.push(this.escapeHTML(fullMatch));
         }
@@ -781,7 +840,7 @@ const API = {
         if (renewal.refreshed) return this.request(method, url, body, { retried: true });
         if (renewal.transient) return { success: false, code: renewal.code || 'NETWORK_ERROR', status: renewal.status, error: renewal.error };
       }
-      if (res.status === 401 && (bearer || !isAuthRequest)) { this.clearToken(); this.clearUser(); }
+      if (res.status === 401 && !isAuthRequest) { this.clearToken(); this.clearUser(); }
       if (res.status === 401 && !isAuthRequest) {
         if (!this.isLoginPage()) window.location.href = this.appPageUrl('login.html');
         return { success: false, status: 401, error: '인증이 만료되었습니다.' };
@@ -907,6 +966,8 @@ const API = {
       is_alarm_enabled: this.normalizeFlag(u.is_alarm_enabled),
       is_class_approved: true,
       can_complete_assignments: this.normalizeFlag(u.can_complete_assignments),
+      can_switch_admin_mode: this.normalizeFlag(u.can_switch_admin_mode),
+      admin_mode_enabled: this.normalizeFlag(u.admin_mode_enabled),
       is_admin: this.normalizeFlag(u.is_admin)
     };
   },
@@ -921,6 +982,7 @@ const API = {
     }
 
     if (!this.currentUserRequest) {
+      const profileRevision = this.profileRevision;
       this.currentUserRequest = (async () => {
         if (this.getAuthMode() === 'bearer' && !this.getToken()) {
           const renewal = await this.refreshRememberedSession();
@@ -930,6 +992,7 @@ const API = {
         return this.me();
       })()
         .then((serverUser) => {
+          if (profileRevision !== this.profileRevision) return this.getUser();
           if (serverUser?.error && serverUser.status !== 401) throw new Error(serverUser.error);
           const user = this.normalizeUser(serverUser);
           if (user && user.id && user.grade && user.class_number) {
@@ -945,6 +1008,25 @@ const API = {
     }
     const user = await this.currentUserRequest;
     return user ? this.allowClassUser(user, options) : null;
+  },
+
+  async setAdminMode(enabled) {
+    if (typeof enabled !== 'boolean') return { success: false, error: '관리자 모드 값을 확인해주세요.' };
+    if (this.adminModeRequest) return this.adminModeRequest;
+    const identity = this.userIdentity();
+    const generation = this.logoutGeneration;
+    const operation = this.put('/api/users/me/admin-mode', { enabled }).then(result => {
+      if (!result?.success) return result;
+      if (generation !== this.logoutGeneration || identity !== this.userIdentity()) return { success: false, code: 'AUTH_CHANGED', error: '로그인 상태가 바뀌었습니다.' };
+      const user = this.normalizeUser(result.user);
+      if (!user?.can_switch_admin_mode || Number(user.id) !== Number(this.getUser()?.id)
+        || user.is_admin !== enabled || user.admin_mode_enabled !== enabled) return { success: false, error: '모드 변경 응답을 확인해주세요.' };
+      this.profileRevision++;
+      this.setUser(user);
+      return { ...result, user };
+    }).finally(() => { if (this.adminModeRequest === operation) this.adminModeRequest = null; });
+    this.adminModeRequest = operation;
+    return operation;
   },
 
   getAssignments() { return this.get('/api/assignments'); },
@@ -1008,33 +1090,37 @@ const API = {
     if (!user) return [];
     const force = Boolean(options?.force);
     const userId = String(user.id);
+    const identity = this.userIdentity();
+    const revision = this.profileRevision;
 
-    if (!force && this.notificationCache?.userId === userId && Date.now() - this.notificationCache.fetchedAt < this.notificationCacheTtlMs) {
+    if (!force && this.notificationCache?.identity === identity && Date.now() - this.notificationCache.fetchedAt < this.notificationCacheTtlMs) {
       return this.notificationCache.items;
     }
 
-    if (this.notificationRequest?.userId === userId) {
+    if (this.notificationRequest?.identity === identity) {
       return this.notificationRequest.promise;
     }
 
     const promise = this.get('/api/notifications')
       .then((items) => {
+        if (identity !== this.userIdentity() || revision !== this.profileRevision) return [];
         if (!Array.isArray(items)) return items;
         const normalized = items;
         this.notificationCache = {
           userId,
+          identity,
           items: normalized,
           fetchedAt: Date.now()
         };
         return normalized;
       })
       .finally(() => {
-        if (this.notificationRequest?.userId === userId) {
+        if (this.notificationRequest?.promise === promise) {
           this.notificationRequest = null;
         }
       });
 
-    this.notificationRequest = { userId, promise };
+    this.notificationRequest = { userId, identity, promise };
     return promise;
   },
 
@@ -1062,15 +1148,28 @@ const API = {
     } catch { return ''; }
   },
 
-  formatNotificationTime(value) {
-    const date = new Date(value);
+  parseServerTime(value) {
+    if (value === null || value === undefined || value === '') return new Date(NaN);
+    if (typeof value === 'string') {
+      const raw = value.trim();
+      // Historical MySQL TIMESTAMP strings were serialized without a zone.
+      // They represent UTC; DATE-only assignment deadlines stay date-only.
+      if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return new Date(NaN);
+      const sql = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?$/.exec(raw);
+      if (sql) return new Date(`${sql[1]}T${sql[2]}${sql[3] ? '.' + sql[3].slice(0, 3).padEnd(3, '0') : ''}Z`);
+    }
+    return new Date(value);
+  },
+
+  formatDateTime(value, options = {}) {
+    const date = this.parseServerTime(value);
     if (!Number.isFinite(date.getTime())) return '';
-    return date.toLocaleString('ko-KR', {
-      month: 'numeric',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    return date.toLocaleString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      ...options, timeZone: 'Asia/Seoul', hour12: true }).replace(/\bAM\b/gi, '오전').replace(/\bPM\b/gi, '오후');
+  },
+
+  formatNotificationTime(value) {
+    return this.formatDateTime(value, { year: undefined, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   },
 
   async initNotifications() {
@@ -1090,7 +1189,7 @@ const API = {
     let latestRenderedNotificationAt = null;
 
     const getTimestamp = (value) => {
-      const time = new Date(value).getTime();
+      const time = this.parseServerTime(value).getTime();
       return Number.isFinite(time) ? time : 0;
     };
 

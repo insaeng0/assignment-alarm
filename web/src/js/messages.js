@@ -108,8 +108,7 @@ function renderMessages() {
   if (!messages.length) { container.innerHTML = '<div class="empty-state">아직 등록된 공지가 없어요.<br>새로운 소식이 생기면 이곳에서 확인할 수 있어요.</div>'; return; }
   container.innerHTML = messages.map(message => {
     const badge = message.type === 'grade' ? '<span class="msg-badge grade">학년</span>' : '<span class="msg-badge class">반</span>';
-    const timestamp = new Date(message.created_at);
-    const time = Number.isNaN(timestamp.getTime()) ? '' : timestamp.toLocaleString('ko-KR');
+    const time = API.formatDateTime(message.created_at);
     const canDelete = !message.saving && user && (Number(message.sender_id) === Number(user.id) || user.is_admin);
     const scope = message.type === 'grade' ? `${Number(message.target_grade)}학년` : `${Number(message.target_grade)}학년 ${Number(message.target_class)}반`;
     return `<article class="message-item"${message.saving ? ' aria-busy="true"' : ''}><div class="msg-header"><span class="msg-sender">${API.escapeHTML(message.sender_name || '학교 계정')} ${badge}</span><span class="msg-time">${message.saving ? '저장 중…' : API.escapeHTML(time)}</span></div><div class="msg-content">${API.escapeHTML(message.content)}</div><div class="msg-time" style="margin-top:6px">${scope}</div>${canDelete ? `<div class="actions" style="margin-top:10px"><button type="button" class="btn btn-danger btn-sm delete-message" data-id="${Number(message.message_id)}">삭제</button></div>` : ''}</article>`;

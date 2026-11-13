@@ -30,6 +30,27 @@ test('notification navigation accepts only app pages', () => {
   for (const unsafe of ['javascript:alert(1)', '//evil.example', '/api/auth/logout', 'https://evil.example/calendar.html']) assert.equal(api.safeInternalLink(unsafe), '');
   assert.equal(api.safeInternalLink('calendar.html?assignment=3'), '/calendar.html?assignment=3');
 });
+
+test('database timestamps and notification labels use explicit UTC input and school AM/PM across browser time zones', () => {
+  const previousZone = process.env.TZ;
+  try {
+    let expected;
+    for (const zone of ['UTC', 'America/Los_Angeles', 'Asia/Seoul']) {
+      process.env.TZ = zone;
+      const { api } = createAPI();
+      assert.equal(api.parseServerTime('2026-11-13 06:05:09').toISOString(), '2026-11-13T06:05:09.000Z');
+      assert.equal(api.parseServerTime('2026-11-13 06:05:09.123456').toISOString(), '2026-11-13T06:05:09.123Z');
+      assert.equal(api.parseServerTime('2026-11-13T15:05:09+09:00').toISOString(), '2026-11-13T06:05:09.000Z');
+      const formatted = api.formatDateTime('2026-11-13 06:05:09');
+      expected ??= formatted; assert.equal(formatted, expected); assert.match(formatted, /오후/); assert.match(formatted, /3:05/);
+      assert.equal(formatted, api.formatDateTime('2026-11-13T06:05:09.000Z'));
+      assert.match(api.formatNotificationTime('2026-11-13T00:05:00.000Z'), /오전/);
+      assert.match(api.formatNotificationTime('2026-11-13T15:05:00.000Z'), /오전/);
+      assert.equal(api.formatDateTime('2026-11-13'), '', 'DATE-only deadlines must not enter timestamp formatting');
+      for (const invalid of [null, '', 'bad timestamp']) assert.equal(api.formatDateTime(invalid), '');
+    }
+  } finally { if (previousZone === undefined) delete process.env.TZ; else process.env.TZ = previousZone; }
+});
 test('string zero does not grant administrator UI', () => {
   const { api } = createAPI();
   assert.equal(api.normalizeUser({ id: 2, is_admin: '0', is_alarm_enabled: '0' }).is_admin, false);
@@ -184,15 +205,21 @@ test('notification links and login detection work at a GitHub Pages project base
   for (const pathname of ['/assignment/', '/assignment', '/assignment/index.html', '/assignment/login.html']) assert.equal(createAPI({ pathname }).api.isLoginPage(), true);
 });
 
-test('private upload markup uses an authenticated loader and normal external images remain ordinary images', () => {
+test('assignment images use only bounded private uploads while external images become safe manual links and profiles remain supported', () => {
   const { api } = createAPI({ origin: 'https://student.github.io', pathname: '/assignment/calendar.html', config: bearerConfig });
-  const protectedMarkup = api.renderTextWithLinks('![자료](/uploads/example.png)');
-  assert.ok(protectedMarkup.includes('data-protected-image-src="https://api.school.example/uploads/example.png"'));
+  const protectedMarkup = api.renderTextWithLinks('![자료](/uploads/assignment-images/example.png)');
+  assert.ok(protectedMarkup.includes('data-protected-image-src="https://api.school.example/uploads/assignment-images/example.png"'));
   assert.ok(!/\ssrc=/.test(protectedMarkup), 'private uploads must not issue an unauthenticated image request');
   const externalMarkup = api.renderTextWithLinks('![사진](https://images.example/photo.png)');
-  assert.ok(externalMarkup.includes(' src="https://images.example/photo.png"'));
+  assert.ok(externalMarkup.includes('href="https://images.example/photo.png"'));
+  assert.ok(externalMarkup.includes('target="_blank" rel="noopener noreferrer"'));
+  assert.ok(!externalMarkup.includes('<img'));
   assert.ok(!externalMarkup.includes('data-protected-image-src'));
   assert.equal(api.isSafeContentImageUrl('https://api.school.example/api/auth/me'), false);
+  for (const value of ['https://school.example/uploads/assignment-images/photo.png', '/uploads/profile.png', 'https://images.example/huge.png']) {
+    assert.equal(api.isSafeContentImageUrl(value), false);
+    assert.ok(!api.renderTextWithLinks(`![열기](${value})`).includes('<img'));
+  }
   assert.equal(api.isSafeContentImageUrl('javascript:alert(1)'), false);
   assert.equal(api.resolveContentUrl('uploads/example.png').href, 'https://api.school.example/uploads/example.png');
   const attributes = new Map();
@@ -201,6 +228,7 @@ test('private upload markup uses an authenticated loader and normal external ima
   assert.equal(image.src, undefined);
   assert.equal(attributes.get('data-protected-image-src'), 'https://api.school.example/uploads/profile.png');
   assert.equal(api.normalizeUser({ id: 1, profile_image_url: '/uploads/profile.png' }).profile_image_url, 'https://api.school.example/uploads/profile.png');
+  assert.equal(api.isSafeImageUrl('https://images.example/profile.png'), true, 'profile rendering keeps its separate policy');
 });
 
 test('protected image fetches use scoped bearer authorization, reject redirects and validate image bytes type', async () => {
@@ -484,6 +512,8 @@ function rememberedStorage() {
 }
 const persistentRealm = 'a'.repeat(64);
 const persistentConfig = { ...bearerConfig, authRealm: persistentRealm };
+const ownerProfile = (enabled = true) => ({ id: 2, name: '소유자', grade: 1, class_number: 2, can_complete_assignments: true,
+  is_admin: enabled, can_switch_admin_mode: true, admin_mode_enabled: enabled });
 const refreshValue = char => 'b'.repeat(64) + '.' + char.repeat(64);
 function persistentFixture() {
   const indexedDB = rememberedStorage(), storageMap = new Map(), requests = [];
@@ -596,6 +626,198 @@ test('remembered restoration uses its authoritative profile without a redundant 
   const user = await fresh.api.ensureUser(); assert.equal(user.id, 2);
   assert.equal(f.requests.filter(item => item.url.endsWith('/auth/refresh')).length, 1);
   assert.equal(f.requests.filter(item => item.url.endsWith('/auth/me')).length, 0);
+});
+
+test('admin mode changes install only confirmed owner state, invalidate scoped caches, and share duplicate writes', async () => {
+  let finish, writes = 0;
+  const { api } = createAPI({ fetch: async (url, options) => {
+    assert.equal(new URL(url).pathname, '/api/users/me/admin-mode'); assert.equal(options.method, 'PUT');
+    assert.deepEqual(JSON.parse(options.body), { enabled: false }); writes++;
+    return new Promise(done => { finish = done; });
+  } });
+  api.setUser(ownerProfile());
+  api.setCachedData('/api/admin/users', { items: [{ user_id: 3 }] });
+  api.notificationCache = { identity: api.userIdentity(), items: ['old'], fetchedAt: Date.now() };
+  const first = api.setAdminMode(false), duplicate = api.setAdminMode(false);
+  assert.equal(api.getUser().is_admin, true); assert.equal(writes, 1);
+  finish(response({ success: true, user: ownerProfile(false) }));
+  assert.equal((await first).success, true); await duplicate;
+  assert.equal(api.getUser().is_admin, false); assert.equal(api.getUser().can_switch_admin_mode, true);
+  assert.equal(api.getCachedData('/api/admin/users'), null); assert.equal(api.notificationCache, null);
+  assert.equal((await api.setAdminMode('true')).success, false); assert.equal(writes, 1);
+});
+
+test('a profile lookup started before a confirmed mode change cannot reinstall stale admin privileges', async () => {
+  let finishBody, bodyStarted;
+  const begun = new Promise(done => { bodyStarted = done; }); let reads = 0;
+  const { api } = createAPI({ fetch: async url => {
+    if (url.endsWith('/admin-mode')) return response({ success: true, user: ownerProfile(false) });
+    reads++;
+    return reads === 1 ? { status: 200, ok: true, json: () => { bodyStarted(); return new Promise(done => { finishBody = done; }); } } : response(ownerProfile(false));
+  } });
+  api.setUser(ownerProfile());
+  const read = api.ensureUser({ force: true }); await begun;
+  await api.setAdminMode(false); finishBody(ownerProfile());
+  assert.equal((await read).is_admin, false); assert.equal(api.getUser().is_admin, false);
+});
+
+test('a refresh begun before mode-off keeps the rotated remembered credential without restoring the old role', async () => {
+  const fixture = persistentFixture(); let finishBody, bodyStarted;
+  const begun = new Promise(done => { bodyStarted = done; });
+  const { api } = fixture.open({ fetch: async (url, options) => {
+    if (url.endsWith('/admin-mode')) return response({ success: true, user: ownerProfile(false) });
+    const result = await fixture.fetcher(url, options);
+    if (!url.endsWith('/auth/refresh')) return result;
+    const data = await result.json();
+    return { status: 200, ok: true, json: () => { bodyStarted(); return new Promise(done => { finishBody = () => done({ ...data, user: ownerProfile() }); }); } };
+  } });
+  await api.googleAuth('credential'); api.setUser(ownerProfile());
+  const old = fixture.indexedDB.records.get(persistentRealm).refreshToken;
+  const renewal = api.refreshRememberedSession(); await begun;
+  await api.setAdminMode(false); finishBody();
+  assert.equal((await renewal).refreshed, true);
+  assert.equal(api.getUser().is_admin, false); assert.equal(api.getUser().can_switch_admin_mode, true);
+  assert.notEqual(fixture.indexedDB.records.get(persistentRealm).refreshToken, old);
+});
+
+test('successful nonremembered account switch discards the previous remembered identity while a failed login preserves it', async () => {
+  const fixture = persistentFixture();
+  const { api } = fixture.open({ fetch: async (url, options) => {
+    if (url.endsWith('/auth/google')) {
+      const body = JSON.parse(options.body);
+      if (body.credential === 'B-failed') return response({ error: 'Google 인증 실패' }, 401);
+      if (body.credential === 'B') {
+        assert.equal(body.rememberMe, false);
+        return response({ accessToken: 'new.payload.signature', expiresAt: expiresAt(), user: { id: 3, grade: 2, class_number: 2 } });
+      }
+    }
+    return fixture.fetcher(url, options);
+  } });
+  await api.googleAuth('A');
+  const previous = fixture.indexedDB.records.get(persistentRealm).refreshToken;
+  await api.post('/api/auth/google', { credential: 'B-failed', rememberMe: false });
+  assert.equal(fixture.indexedDB.records.get(persistentRealm).refreshToken, previous);
+  assert.equal(api.getUser().id, 2); assert.equal(api.getToken(), token);
+  await api.post('/api/auth/google', { credential: 'B', rememberMe: false });
+  assert.equal(api.getUser().id, 3); assert.equal(api.getToken(), 'new.payload.signature');
+  assert.equal(fixture.indexedDB.records.has(persistentRealm), false);
+  const reopened = fixture.open();
+  assert.equal(await reopened.api.readRememberedSession(), null);
+});
+
+test('a delayed previous-account refresh cannot repopulate remembered storage or replace a new nonremembered session', async () => {
+  const fixture = persistentFixture(); let finishBody, bodyStarted;
+  const begun = new Promise(done => { bodyStarted = done; });
+  const { api } = fixture.open({ fetch: async (url, options) => {
+    if (url.endsWith('/auth/google') && JSON.parse(options.body).credential === 'B') return response({ accessToken: 'new.payload.signature', expiresAt: expiresAt(), user: { id: 3, grade: 2, class_number: 2 } });
+    const result = await fixture.fetcher(url, options);
+    if (!url.endsWith('/auth/refresh')) return result;
+    const data = await result.json();
+    return { status: 200, ok: true, json: () => { bodyStarted(); return new Promise(done => { finishBody = () => done(data); }); } };
+  } });
+  await api.googleAuth('A');
+  const renewal = api.refreshRememberedSession(); await begun;
+  await api.post('/api/auth/google', { credential: 'B', rememberMe: false }); finishBody(); await renewal;
+  assert.equal(api.getUser().id, 3); assert.equal(api.getToken(), 'new.payload.signature');
+  assert.equal(fixture.indexedDB.records.has(persistentRealm), false);
+});
+
+test('a late refresh 401 cannot clear a new account or a newly confirmed mode on the same account', async () => {
+  for (const boundary of ['account', 'mode']) {
+    const fixture = persistentFixture(); let finishBody, bodyStarted;
+    const begun = new Promise(done => { bodyStarted = done; });
+    const { api } = fixture.open({ fetch: async (url, options) => {
+      if (url.endsWith('/admin-mode')) return response({ success: true, user: ownerProfile(false) });
+      if (url.endsWith('/auth/google') && JSON.parse(options.body).credential === 'B') return response({ accessToken: 'new.payload.signature', expiresAt: expiresAt(), user: { id: 3, grade: 2, class_number: 2 } });
+      if (url.endsWith('/auth/refresh')) return { status: 401, ok: false,
+        json: () => { bodyStarted(); return new Promise(done => { finishBody = () => done({ error: 'old refresh expired' }); }); } };
+      return fixture.fetcher(url, options);
+    } });
+    await api.googleAuth('A'); api.setUser(ownerProfile());
+    const renewal = api.refreshRememberedSession(); await begun;
+    if (boundary === 'account') await api.post('/api/auth/google', { credential: 'B', rememberMe: false });
+    else await api.setAdminMode(false);
+    finishBody(); await renewal;
+    assert.equal(api.getUser().id, boundary === 'account' ? 3 : 2, boundary);
+    assert.equal(api.getUser().is_admin, false, boundary);
+    assert.equal(api.getToken(), boundary === 'account' ? 'new.payload.signature' : token, boundary);
+    assert.equal(fixture.indexedDB.records.has(persistentRealm), boundary !== 'account', boundary);
+  }
+});
+
+test('an old account refresh conflict never rotates or consumes the new account remembered credential', async () => {
+  const fixture = persistentFixture(); let finishConflict, started, refreshes = 0;
+  const begun = new Promise(done => { started = done; });
+  const bSession = () => ({ accessToken: 'new.payload.signature', expiresAt: expiresAt(), refreshToken: refreshValue('e'),
+    refreshExpiresAt: new Date(Date.now() + 90 * 86400_000).toISOString(), authRealm: persistentRealm, user: { id: 3, grade: 2, class_number: 2 } });
+  const { api } = fixture.open({ fetch: async (url, options) => {
+    if (url.endsWith('/auth/google') && JSON.parse(options.body).credential === 'B') return response(bSession());
+    if (url.endsWith('/auth/refresh')) {
+      refreshes++;
+      if (refreshes > 1) return response({ ...bSession(), refreshToken: refreshValue('f') });
+      started(); return new Promise(done => { finishConflict = () => done(response({ code: 'REFRESH_RACE' }, 409)); });
+    }
+    return fixture.fetcher(url, options);
+  } });
+  await api.googleAuth('A');
+  const old = api.refreshRememberedSession(); await begun;
+  await api.googleAuth('B'); finishConflict(); await old;
+  assert.equal(refreshes, 1); assert.equal(api.getUser().id, 3); assert.equal(api.getToken(), 'new.payload.signature');
+  assert.equal(fixture.indexedDB.records.get(persistentRealm).refreshToken, refreshValue('e'));
+  assert.equal(fixture.indexedDB.records.get(persistentRealm).pendingRequestId, null);
+});
+
+test('a protected image does not retry across a mode change during token renewal', async () => {
+  let finishRenewal, started;
+  const begun = new Promise(done => { started = done; }); let fetches = 0;
+  const { api } = createAPI({ config: bearerConfig, fetch: async () => { fetches++; return response({ error: 'expired' }, 401); } });
+  api.setToken(token, expiresAt()); api.setUser(ownerProfile());
+  api.refreshRememberedSession = () => { started(); return new Promise(done => { finishRenewal = done; }); };
+  const pending = api.requestImage('/uploads/private.png'); await begun;
+  api.setUser(ownerProfile(false)); api.setToken('new.payload.signature', expiresAt());
+  finishRenewal({ refreshed: true });
+  await assert.rejects(pending, error => error.code === 'AUTH_CHANGED');
+  assert.equal(fetches, 1); assert.equal(api.getUser().is_admin, false);
+});
+
+test('an old protected-image response or body cannot cross an account, role, class or logout boundary', async () => {
+  for (const boundary of ['account', 'role', 'class', 'logout']) {
+    for (const delayedBody of [false, true]) {
+      let finish, started;
+      const begun = new Promise(done => { started = done; });
+      const image = { type: 'image/png', size: 10 };
+      const { api } = createAPI({ config: bearerConfig, fetch: async () => delayedBody
+        ? { status: 200, ok: true, blob: () => { started(); return new Promise(done => { finish = () => done(image); }); } }
+        : new Promise(done => { finish = () => done({ status: 200, ok: true, blob: async () => image }); started(); }) });
+      api.setToken(token, expiresAt()); api.setUser(ownerProfile());
+      const pending = api.requestImage('/uploads/private.png'); await begun;
+      if (boundary === 'account') { api.setUser({ ...ownerProfile(), id: 3 }); api.setToken('new.payload.signature', expiresAt()); }
+      if (boundary === 'role') api.setUser(ownerProfile(false));
+      if (boundary === 'class') api.setUser({ ...ownerProfile(), class_number: 3 });
+      if (boundary === 'logout') { api.logoutGeneration++; api.clearUser(); api.clearToken(); }
+      finish(); await assert.rejects(pending, error => error.code === 'AUTH_CHANGED', `${boundary}/${delayedBody}`);
+    }
+  }
+});
+
+test('a stale image 401 never clears the new account token or retries with its credentials', async () => {
+  let finish; let calls = 0;
+  const { api } = createAPI({ config: bearerConfig, fetch: () => { calls++; return new Promise(done => { finish = done; }); } });
+  api.setToken(token, expiresAt()); api.setUser(ownerProfile());
+  const pending = api.requestImage('/uploads/private.png');
+  api.setUser({ ...ownerProfile(false), id: 3 }); api.setToken('new.payload.signature', expiresAt());
+  finish(response({ error: 'old expired token' }, 401));
+  await assert.rejects(pending, error => error.code === 'AUTH_CHANGED');
+  assert.equal(api.getToken(), 'new.payload.signature'); assert.equal(api.getUser().id, 3); assert.equal(calls, 1);
+});
+
+test('scope changes abort and revoke already displayed private image blobs', () => {
+  const { api } = createAPI(); api.setUser(ownerProfile());
+  let aborted = false, removed = false;
+  api.protectedImageStates.set({ removeAttribute: key => { removed = key === 'src'; } },
+    { controller: { abort: () => { aborted = true; } }, objectUrl: 'blob:test' });
+  api.setUser(ownerProfile(false));
+  assert.equal(aborted, true); assert.equal(removed, true); assert.equal(api.protectedImageStates.size, 0);
 });
 
 test('a profile response whose body arrives after logout cannot restore the old identity', async () => {

@@ -39,6 +39,7 @@ function settings({ initialUser = account(), api = {} } = {}) {
     isSafeImageUrl: () => false, getTheme: () => 'light', getResolvedTheme: () => 'light',
     escapeHTML: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
     renderTextWithLinks: value => String(value), getCachedData: () => null,
+    formatDateTime: value => String(value || ''),
     getAdminAssignments: never, getAdminMessages: never, getAdminUsers: never,
     updateUser: (...args) => { calls.push(['updateUser', ...args]); return never(); },
     updateAdminUser: (...args) => { calls.push(['updateAdminUser', ...args]); return never(); },
@@ -69,6 +70,59 @@ test('cached profile and visible admin assignments render before identity or lis
   assert.equal(app.node('adminAssignmentSection').style.display, 'block');
   assert.ok(app.node('adminAssignmentList').innerHTML.includes('과제1'));
   assert.equal(app.state().assignments.length, 1);
+});
+
+test('only the owner sees the mode switch and permission changes wait for confirmed server state', async () => {
+  const write = deferred(); let writes = 0;
+  const owner = { ...account(), can_switch_admin_mode: true, admin_mode_enabled: true };
+  const app = settings({ initialUser: owner, api: { setAdminMode: enabled => { writes++; assert.equal(enabled, false); return write.promise; } } });
+  assert.equal(app.node('adminModeSetting').hidden, false);
+  const toggle = app.node('adminModeToggle'), handler = app.listeners.get('adminModeToggle:click');
+  const operation = handler();
+  assert.equal(toggle.getAttribute('aria-checked'), 'true');
+  assert.equal(app.API.getUser().is_admin, true, 'no optimistic privilege change');
+  assert.equal(toggle.disabled, true); assert.equal(toggle.getAttribute('aria-busy'), 'true');
+  await handler(); assert.equal(writes, 1);
+  app.API.setUser({ ...owner, is_admin: false, admin_mode_enabled: false });
+  write.resolve({ success: true, user: app.API.getUser() }); await operation;
+  assert.equal(toggle.getAttribute('aria-checked'), 'false'); assert.equal(toggle.disabled, false);
+  assert.equal(app.node('adminAssignmentSection').style.display, 'none');
+  assert.equal(app.node('adminModeSetting').hidden, false, 'the off owner retains the recovery switch');
+  assert.equal(app.state().assignments.length, 0);
+  const ordinary = settings();
+  assert.equal(ordinary.node('adminModeSetting').hidden, true);
+  await ordinary.listeners.get('adminModeToggle:click')();
+});
+
+test('mode failures keep current privileges and a confirmed re-enable restores admin sections', async () => {
+  const owner = { ...account(), is_admin: false, can_switch_admin_mode: true, admin_mode_enabled: false };
+  const failed = settings({ initialUser: owner, api: { setAdminMode: async () => ({ success: false, error: '모드 저장 실패' }) } });
+  await failed.listeners.get('adminModeToggle:click')();
+  assert.equal(failed.API.getUser().is_admin, false);
+  assert.equal(failed.node('adminModeToggle').getAttribute('aria-checked'), 'false');
+  assert.equal(failed.node('adminModeToggle').disabled, false);
+  assert.equal(failed.toasts.at(-1).error, true); assert.match(failed.toasts.at(-1).text, /모드 저장 실패/);
+  const enabled = settings({ initialUser: owner });
+  enabled.API.setAdminMode = async value => {
+    assert.equal(value, true);
+    enabled.API.setUser({ ...owner, is_admin: true, admin_mode_enabled: true });
+    return { success: true, user: enabled.API.getUser() };
+  };
+  await enabled.listeners.get('adminModeToggle:click')();
+  assert.equal(enabled.node('adminModeToggle').getAttribute('aria-checked'), 'true');
+  assert.equal(enabled.node('adminAssignmentSection').style.display, 'block');
+});
+
+test('a delayed mode response cannot change another account profile or restore its former admin rows', async () => {
+  const write = deferred();
+  const app = settings({ initialUser: { ...account(), can_switch_admin_mode: true, admin_mode_enabled: true }, api: { setAdminMode: () => write.promise } });
+  app.records('assignment', [assignment(4)]);
+  const operation = app.listeners.get('adminModeToggle:click')();
+  app.API.setUser({ ...account(), id: 91, is_admin: false }); app.run('syncSettingsScope()');
+  write.resolve({ success: true, user: { ...account(), is_admin: false } }); await operation;
+  assert.equal(app.API.getUser().id, 91); assert.equal(app.API.getUser().is_admin, false);
+  assert.equal(app.node('adminModeSetting').hidden, true); assert.equal(app.state().assignments.length, 0);
+  assert.equal(app.toasts.length, 0);
 });
 
 test('alarm changes UI and cached preference immediately, ignores duplicates and rolls back only that field', async () => {

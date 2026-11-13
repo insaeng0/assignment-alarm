@@ -14,6 +14,7 @@ function noticePage(options = {}) {
   const rows = options.rows || [];
   const API = { requireAuth() {}, getUser: () => user, ensureUser: options.ensureUser || (async () => null), loadUserInfo() {}, initNotifications: async () => {}, refreshNotifications: async () => {}, getCachedData: () => rows,
     escapeHTML: text => String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+    formatDateTime: value => '한국 시각 ' + value,
     getMessages: options.getMessages || (async () => rows),
     sendMessage: payload => { sent.push(payload); return options.send ? options.send(payload) : Promise.resolve({ success: true, message_id: 70 }); },
     deleteMessage: options.remove || (async () => ({ success: true })) };

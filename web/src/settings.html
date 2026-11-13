@@ -70,6 +70,14 @@
         <p class="settings-help-text">새 과제와 다가오는 마감일을 알려드려요.</p>
       </div>
 
+      <div class="settings-section" id="adminModeSetting" hidden>
+          <div class="toggle-row">
+            <label for="adminModeToggle">관리자 모드</label>
+            <button type="button" class="toggle" id="adminModeToggle" role="switch" aria-checked="false" aria-label="관리자 모드 사용"></button>
+          </div>
+          <p class="settings-help-text" id="adminModeHelp">끄면 일반 학생 권한으로 이용하며, 여기서 다시 켤 수 있어요.</p>
+      </div>
+
       <div class="settings-section">
         <div class="theme-mode-row">
           <label for="themeModeSelect">화면 모드</label>
@@ -142,8 +150,8 @@
   </div>
 
     <script src="js/runtime-config.js?v=1"></script>
-  <script src="js/api.js?v=24"></script>
+  <script src="js/api.js?v=25"></script>
   <script src="js/app-shell.js?v=3"></script>
-    <script src="js/settings.js?v=7"></script>
+    <script src="js/settings.js?v=8"></script>
 </body>
 </html>
