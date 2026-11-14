@@ -29,6 +29,32 @@ CREATE TABLE IF NOT EXISTS assignments (
   KEY assignments_created_at_idx (created_at)
 );
 
+-- Private, operator-imported signup suggestions. Names are not identity proof.
+CREATE TABLE IF NOT EXISTS student_roster_imports (
+  academic_year SMALLINT UNSIGNED NOT NULL,
+  grade TINYINT UNSIGNED NOT NULL,
+  revision CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  entry_count INT UNSIGNED NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (academic_year, grade)
+);
+
+CREATE TABLE IF NOT EXISTS student_roster_entries (
+  roster_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+  academic_year SMALLINT UNSIGNED NOT NULL,
+  grade TINYINT UNSIGNED NOT NULL,
+  class_number TINYINT UNSIGNED NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  normalized_name VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  claimed_user_id INT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY roster_scope_name_unique (academic_year, grade, class_number, normalized_name),
+  UNIQUE KEY roster_year_user_unique (academic_year, claimed_user_id),
+  KEY roster_lookup_idx (academic_year, grade, normalized_name, is_active),
+  FOREIGN KEY (claimed_user_id) REFERENCES users(user_id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS messages (
   message_id INT AUTO_INCREMENT PRIMARY KEY,
   sender_id INT NOT NULL,

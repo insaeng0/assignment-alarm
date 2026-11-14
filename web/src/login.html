@@ -51,7 +51,12 @@
           <label for="googleProfileEmail">이메일</label>
           <input type="text" id="googleProfileEmail" readonly>
         </div>
-        <div class="form-row">
+        <div class="form-group" id="googleRosterBox" hidden>
+          <label for="googleRosterChoice">소속 확인</label>
+          <p class="field-help" id="googleRosterHint" role="status"></p>
+          <select id="googleRosterChoice" hidden></select>
+        </div>
+        <div class="form-row" id="googleManualScope">
           <div class="form-group">
             <label for="googleGrade">학년</label>
           <select id="googleGrade">
@@ -80,6 +85,6 @@
 
   <script src="js/runtime-config.js?v=1"></script>
   <script src="js/api.js?v=25"></script>
-  <script src="js/login.js?v=9"></script>
+  <script src="js/login.js?v=10"></script>
 </body>
 </html>

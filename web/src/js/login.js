@@ -4,6 +4,64 @@ let googleButtonRendered = false;
 let googleSignInInFlight = false;
 let googleLoadAttempts = 0;
 let loadingPublicConfig = false;
+let googleRosterCandidates = [];
+let googleRosterRequired = false;
+let googleRosterBlocked = false;
+
+function resetRosterSelection() {
+  googleRosterCandidates = [];
+  googleRosterRequired = false;
+  googleRosterBlocked = false;
+  document.getElementById('googleRosterBox').hidden = true;
+  const choice = document.getElementById('googleRosterChoice');
+  choice.innerHTML = '';
+  choice.value = '';
+  choice.required = false;
+  choice.hidden = true;
+  document.getElementById('googleManualScope').hidden = false;
+  document.getElementById('googleGrade').disabled = false;
+  document.getElementById('googleClass').disabled = false;
+}
+
+function configureRosterSelection(profile, response = {}) {
+  resetRosterSelection();
+  const required = response.rosterRequired === true;
+  const raw = response.rosterCandidates;
+  if (!required && raw === undefined) return; // The previous server uses manual class selection.
+  const normalizeName = value => String(value || '').normalize('NFKC').replace(/\s+/gu, '');
+  const valid = Array.isArray(raw) && raw.length <= 12 && raw.every(candidate => candidate
+    && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(candidate.roster_id)
+    && Number.isInteger(candidate.grade) && candidate.grade >= 1 && candidate.grade <= 3
+    && Number.isInteger(candidate.class_number) && candidate.class_number >= 1 && candidate.class_number <= 4
+    && normalizeName(candidate.name) === normalizeName(profile?.name));
+  if (!required && valid && raw.length === 0) return;
+  const box = document.getElementById('googleRosterBox');
+  const hint = document.getElementById('googleRosterHint');
+  box.hidden = false;
+  document.getElementById('googleManualScope').hidden = true;
+  document.getElementById('googleGrade').disabled = true;
+  document.getElementById('googleClass').disabled = true;
+  googleRosterRequired = true;
+  if (!required || !valid || new Set(raw.map(item => item.roster_id)).size !== raw.length || !raw.length) {
+    googleRosterBlocked = true;
+    hint.textContent = '연결할 수 있는 명단을 확인하지 못했습니다. 이름과 소속을 확인한 뒤 다시 로그인해주세요.';
+    return;
+  }
+  googleRosterCandidates = raw.map(({ roster_id, grade, class_number }) => ({ roster_id, grade, class_number }));
+  const choice = document.getElementById('googleRosterChoice');
+  choice.innerHTML = '<option value="">본인의 반을 선택해주세요</option>' + googleRosterCandidates.map(candidate =>
+    `<option value="${candidate.roster_id}">${candidate.grade}학년 ${candidate.class_number}반</option>`).join('');
+  choice.required = true;
+  if (googleRosterCandidates.length === 1 && response.rosterAmbiguous !== true) {
+    const candidate = googleRosterCandidates[0];
+    choice.value = candidate.roster_id;
+    hint.textContent = `명단에서 이름을 찾았어요. ${candidate.grade}학년 ${candidate.class_number}반으로 연결합니다.`;
+  } else {
+    choice.hidden = false;
+    choice.value = '';
+    hint.textContent = '같은 이름이 여러 반에 있어요. 본인의 반을 선택해주세요. 목록에 없다면 이름과 소속을 확인해주세요.';
+  }
+}
 
 function setGoogleUiBusy(isBusy) {
   googleSignInInFlight = isBusy;
@@ -16,7 +74,7 @@ function setGoogleUiBusy(isBusy) {
     loginBox.style.opacity = isBusy ? '0.7' : '';
   }
   if (profileButton) {
-    profileButton.disabled = isBusy;
+    profileButton.disabled = isBusy || googleRosterBlocked;
     profileButton.textContent = isBusy ? '처리 중...' : '시작하기';
   }
   if (cancelButton) {
@@ -53,17 +111,19 @@ async function finalizeGoogleLogin(user) {
 
     function showLoginForm() {
       hideError();
+      resetRosterSelection();
       document.getElementById('googleProfileForm').style.display = 'none';
       document.getElementById('loginForm').style.display = 'block';
     }
 
-    function showGoogleProfileForm(profile, setupToken) {
+    function showGoogleProfileForm(profile, setupToken, response = {}) {
       hideError();
       googleSetupToken = setupToken;
       document.getElementById('loginForm').style.display = 'none';
       document.getElementById('googleProfileForm').style.display = 'block';
       document.getElementById('googleProfileName').value = profile?.name || '';
       document.getElementById('googleProfileEmail').value = profile?.email || '';
+      configureRosterSelection(profile, response);
     }
 
     function getGoogleApi() {
@@ -81,7 +141,7 @@ async function handleGoogleCredential(credential) {
       return;
     }
     if (res.requiresProfile) {
-      showGoogleProfileForm(res.profile, res.setupToken);
+      showGoogleProfileForm(res.profile, res.setupToken, res);
       return;
     }
     await finalizeGoogleLogin(res.user);
@@ -177,12 +237,19 @@ document.getElementById('googleProfileForm').addEventListener('submit', async (e
     return;
   }
 
+  const candidate = googleRosterCandidates.find(item => item.roster_id === document.getElementById('googleRosterChoice').value);
+  if (googleRosterBlocked || (googleRosterRequired && !candidate)) {
+    showError(googleRosterBlocked ? '연결할 수 있는 명단을 먼저 확인해주세요.' : '본인의 학년과 반을 선택해주세요.');
+    return;
+  }
+
   setGoogleUiBusy(true);
   try {
     const payload = {
       setupToken: googleSetupToken,
-      grade: parseInt(document.getElementById('googleGrade').value, 10),
-      class_number: parseInt(document.getElementById('googleClass').value, 10)
+      grade: candidate ? candidate.grade : parseInt(document.getElementById('googleGrade').value, 10),
+      class_number: candidate ? candidate.class_number : parseInt(document.getElementById('googleClass').value, 10),
+      ...(candidate ? { roster_id: candidate.roster_id } : {})
     };
     const res = await API.googleRegister(payload);
     if (!res || res.error) {

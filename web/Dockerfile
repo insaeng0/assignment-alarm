@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY server.js ./server.js
+COPY import-roster.js ./import-roster.js
 COPY lib ./lib
 COPY src ./src
 RUN mkdir -p /app/uploads/assignment-images && chown -R node:node /app

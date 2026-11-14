@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { RefreshSessions, refreshSchema } = require('./lib/refresh-sessions');
 const { validateImageDimensions } = require('./lib/image-dimensions');
 const { databaseTimeOptions, installUtcDatabaseSessions } = require('./lib/database-time');
+const { rosterSchema, rosterError, normalizeRosterName, studentRosterScope, lookupRoster, publicRosterCandidates } = require('./lib/student-roster');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -531,9 +532,9 @@ function verifyPagesAccessToken(token) {
   return decoded;
 }
 
-function createGoogleSetupToken(profile) {
+function createGoogleSetupToken(profile, roster) {
   return jwt.sign(
-    { type: 'google-setup', profile },
+    { type: 'google-setup', profile, roster },
     JWT_SECRET,
     { expiresIn: '10m', algorithm: 'HS256', issuer: 'assignment-alarm', audience: 'google-setup' }
   );
@@ -949,12 +950,13 @@ async function verifyGoogleCredential(credential) {
     google_sub: payload.sub,
     google_email: email,
     name: normalizeGoogleName(payload.name || payload.email || 'Google 사용자'),
+    roster_name: normalizeRosterName(payload.name),
     profile_image_url: payload.picture || null
   };
 }
 
-async function findUserByGoogleSub(googleSub) {
-  const [rows] = await pool.execute(
+async function findUserByGoogleSub(googleSub, connection = pool) {
+  const [rows] = await connection.execute(
     'SELECT user_id, name, grade, class_number, class_approved, profile_image_url, is_alarm_enabled, is_admin, admin_mode_enabled, google_sub, google_email FROM users WHERE google_sub = ? LIMIT 1',
     [googleSub]
   );
@@ -1191,6 +1193,7 @@ async function ensureIndex(conn, tableName, indexName, definitionSql) {
 }
 
 async function migrateSchema(conn) {
+  for (const statement of rosterSchema) await conn.execute(statement);
   // 기존 email 값은 복구에 필요하므로 보존하고 새 Google 가입은 NULL을 허용합니다.
   const [legacyEmailColumns] = await conn.execute(
     `SELECT COLUMN_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS
@@ -1497,9 +1500,17 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
     }
 
 
+    const rosterScope = studentRosterScope(profile, { isAdmin: isAdminEmail(profile.google_email) });
+    let rosterRows;
+    try { rosterRows = await lookupRoster(pool, profile, rosterScope); }
+    catch { throw rosterError('ROSTER_UNAVAILABLE', 503); }
+    const rosterRequired = rosterRows.length > 0;
     return res.json({
       requiresProfile: true,
-      setupToken: createGoogleSetupToken(profile),
+      setupToken: createGoogleSetupToken(profile, { academic_year: rosterScope?.academic_year ?? null, grade: rosterScope?.grade ?? null, required: rosterRequired }),
+      rosterCandidates: publicRosterCandidates(rosterRows),
+      rosterRequired,
+      rosterAmbiguous: rosterRows.length > 1,
       profile: {
         name: profile.name,
         email: profile.google_email,
@@ -1507,6 +1518,7 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
       }
     });
   } catch (error) {
+    if (error?.code === 'ROSTER_UNAVAILABLE') return res.status(503).json({ code: error.code, error: '가입 정보를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.' });
     if (error?.code === 'PAGES_SESSION_CAPACITY') {
       res.setHeader('Retry-After', '60');
       return res.status(503).json({ error: '현재 로그인 사용자가 많습니다. 잠시 후 다시 시도해주세요.' });
@@ -1523,15 +1535,7 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
 app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
   try {
     const setupToken = String(req.body.setupToken || '').trim();
-    const grade = parseInteger(req.body.grade);
-    const class_number = parseInteger(req.body.class_number);
-
-    if (!setupToken || !grade || !class_number) {
-      return res.status(400).json({ error: '학년과 반을 입력해주세요.' });
-    }
-    if (grade < 1 || grade > MAX_GRADE || class_number < 1 || class_number > MAX_CLASS) {
-      return res.status(400).json({ error: '학년 또는 반 값이 올바르지 않습니다.' });
-    }
+    if (!setupToken) return res.status(400).json({ error: '구글 가입 정보가 없습니다.' });
 
     let decoded;
     try {
@@ -1580,27 +1584,51 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
     const uniqueName = normalizeGoogleName(decoded.profile.name);
     const isAdmin = isAdminEmail(decoded.profile.google_email) ? 1 : 0;
     const passwordHash = await bcrypt.hash(`google:${decoded.profile.google_sub}:${crypto.randomBytes(8).toString('hex')}`, 10);
-    const [result] = await pool.execute(
-      'INSERT INTO users (password, name, google_sub, google_email, grade, class_number, profile_image_url, is_admin, class_approved) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
-      [
-        passwordHash,
-        uniqueName,
-        decoded.profile.google_sub,
-        decoded.profile.google_email,
-        grade,
-        class_number,
-        decoded.profile.profile_image_url,
-        isAdmin
-      ]
-    );
-
-    const user = { id: result.insertId, name: uniqueName, grade, class_number, is_admin: isAdmin };
+    const scope = studentRosterScope(decoded.profile, { isAdmin: Boolean(isAdmin) });
+    if (decoded.roster?.academic_year !== null && decoded.roster?.academic_year !== undefined
+        && (decoded.roster.academic_year !== scope?.academic_year || decoded.roster.grade !== scope?.grade)) throw rosterError('ROSTER_CHANGED', 409);
+    const registration = await withTransaction(async connection => {
+      const rows = await lookupRoster(connection, decoded.profile, scope, { lock: true });
+      const linked = await findUserByGoogleSub(decoded.profile.google_sub, connection);
+      if (linked) return { linked };
+      const rosterId = req.body.roster_id;
+      const hasRosterId = rosterId !== undefined && rosterId !== null && rosterId !== '';
+      if ((decoded.roster?.required === true || rows.length > 0) && !hasRosterId) throw rosterError('ROSTER_SELECTION_REQUIRED');
+      let grade = parseInteger(req.body.grade), class_number = parseInteger(req.body.class_number), selected;
+      if (hasRosterId) {
+        if (typeof rosterId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(rosterId)) throw rosterError('ROSTER_SELECTION_INVALID');
+        selected = rows.find(row => row.roster_id === rosterId);
+        if (!selected) throw rosterError('ROSTER_SELECTION_INVALID');
+        if (selected.claimed_user_id !== null && selected.claimed_user_id !== undefined) throw rosterError('ROSTER_ALREADY_CLAIMED', 409);
+        if ((req.body.grade !== undefined && grade !== Number(selected.grade))
+            || (req.body.class_number !== undefined && class_number !== Number(selected.class_number))) throw rosterError('ROSTER_SELECTION_INVALID');
+        grade = Number(selected.grade); class_number = Number(selected.class_number);
+      }
+      if (!grade || grade < 1 || grade > MAX_GRADE || !class_number || class_number < 1 || class_number > MAX_CLASS) throw rosterError('PROFILE_CLASS_INVALID');
+      const [result] = await connection.execute(
+        'INSERT INTO users (password, name, google_sub, google_email, grade, class_number, profile_image_url, is_admin, class_approved) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
+        [passwordHash, uniqueName, decoded.profile.google_sub, decoded.profile.google_email, grade, class_number, decoded.profile.profile_image_url, isAdmin]
+      );
+      if (selected) {
+        const [claim] = await connection.execute('UPDATE student_roster_entries SET claimed_user_id = ? WHERE roster_id = ? AND claimed_user_id IS NULL AND is_active = 1', [result.insertId, selected.roster_id]);
+        if (claim.affectedRows !== 1) throw rosterError('ROSTER_ALREADY_CLAIMED', 409);
+      }
+      return { id: result.insertId, grade, class_number };
+    });
+    if (registration.linked) {
+      const linked = registration.linked;
+      const session = await createLoginSession(res, linked, req.body.rememberMe);
+      clearAuthRateLimit(req);
+      return res.json({ ...session, user: withClassApproval({ ...linked, id: linked.user_id }) });
+    }
+    const { id, grade, class_number } = registration;
+    const user = { id, name: uniqueName, grade, class_number, is_admin: isAdmin };
     const session = await createLoginSession(res, user, req.body.rememberMe);
     clearAuthRateLimit(req);
     return res.json({
       ...session,
       user: withClassApproval({
-        id: result.insertId,
+        id,
         name: uniqueName,
         grade,
         class_number,
@@ -1615,6 +1643,12 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
       })
     });
   } catch (e) {
+    if (['ROSTER_SELECTION_REQUIRED', 'ROSTER_SELECTION_INVALID', 'ROSTER_ALREADY_CLAIMED', 'ROSTER_CHANGED', 'PROFILE_CLASS_INVALID'].includes(e?.code)) {
+      const message = e.code === 'ROSTER_SELECTION_REQUIRED' ? '본인 이름에 해당하는 반을 선택해주세요.'
+        : e.code === 'ROSTER_ALREADY_CLAIMED' ? '이미 연결된 명단입니다. 다른 계정 사용 여부를 확인해주세요.'
+        : e.code === 'PROFILE_CLASS_INVALID' ? '학년과 반을 확인해주세요.' : '가입 정보가 변경되었거나 올바르지 않습니다. 다시 로그인해주세요.';
+      return res.status(e.status).json({ code: e.code, error: message });
+    }
     if (e?.code === 'PAGES_SESSION_CAPACITY') {
       res.setHeader('Retry-After', '60');
       return res.status(503).json({ error: '현재 로그인 사용자가 많습니다. 잠시 후 다시 시도해주세요.' });
