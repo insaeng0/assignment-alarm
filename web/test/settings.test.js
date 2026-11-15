@@ -72,6 +72,24 @@ test('cached profile and visible admin assignments render before identity or lis
   assert.equal(app.state().assignments.length, 1);
 });
 
+test('cached settings paint cannot make old permissions authoritative and new owner capability appears after revalidation', async () => {
+  const identity = deferred(), requests = [], writes = [];
+  const cached = { ...account(), can_switch_admin_mode: false, admin_mode_enabled: false };
+  const app = settings({ initialUser: cached, api: {
+    ensureUser(options) { requests.push(options); return identity.promise; },
+    setUser(user) { writes.push(user); }
+  } });
+  assert.equal(app.node('settingName').value, cached.name);
+  assert.equal(app.node('adminModeSetting').hidden, true);
+  assert.equal(writes.length, 0, 'rendering cached data must not refresh its verification timestamp');
+  assert.equal(requests[0].force, true, 'settings verify role capabilities even when the cache is recent');
+  identity.resolve({ ...cached, can_switch_admin_mode: true, admin_mode_enabled: true });
+  await tick();
+  assert.equal(app.node('adminModeSetting').hidden, false);
+  assert.equal(app.node('adminModeToggle').getAttribute('aria-checked'), 'true');
+  assert.equal(writes.at(-1).can_switch_admin_mode, true);
+});
+
 test('only the owner sees the mode switch and permission changes wait for confirmed server state', async () => {
   const write = deferred(); let writes = 0;
   const owner = { ...account(), can_switch_admin_mode: true, admin_mode_enabled: true };

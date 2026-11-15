@@ -265,7 +265,7 @@ API.initTheme();
       syncSettingsScope();
       const cached = API.getUser();
       if (cached) {
-        loadProfile(cached).catch(() => {});
+        loadProfile(cached, { updateCachedUser: false }).catch(() => {});
         if (API.normalizeFlag(cached.is_admin)) {
           document.getElementById('adminAssignmentSection').style.display = 'block';
           document.getElementById('adminMessageSection').style.display = 'block';
@@ -277,7 +277,7 @@ API.initTheme();
           });
         }
       }
-      const user = await API.ensureUser();
+      const user = await API.ensureUser({ force: true });
       if (!user) return;
       syncSettingsScope();
       API.loadUserInfo();
@@ -314,7 +314,7 @@ API.initTheme();
         return adminSettingsState.adminLoading[kind];
       }
 
-    async function loadProfile(userData = null) {
+    async function loadProfile(userData = null, { updateCachedUser = true } = {}) {
       const data = userData || API.getUser();
       if (!data || data.error) return;
       renderAdminMode(data);
@@ -348,7 +348,7 @@ API.initTheme();
       updateThemeHelpText(themeModeSelect.value, API.getResolvedTheme(themeModeSelect.value));
 
       const user = API.getUser();
-      if (user) {
+      if (user && updateCachedUser) {
         user.name = data.name;
         user.grade = data.grade;
         user.class_number = data.class_number;
