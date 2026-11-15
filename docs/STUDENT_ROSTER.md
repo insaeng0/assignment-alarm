@@ -24,7 +24,7 @@ docker compose --env-file .env.pi exec -T web node import-roster.js < /private/o
 
 로컬에서는 DB 환경을 이미 주입한 상태에서 `node web/import-roster.js < /private/operator/path/roster.json`을 사용할 수 있습니다. 별도 Google·JWT 설정은 CLI에 필요하지 않습니다. 출력은 건수와 revision뿐이며 오류도 코드와 0부터 시작하는 행 위치만 반환합니다. 원본 이름·DB 오류 세부 정보는 출력하지 않습니다.
 
-운영 Mac에는 사용자 사진과 대조·확인한 2026학년도 1학년 64명(각 반 16명)의 JSON을 `.runtime/roster/2026-grade1.json`에 권한 600으로 보관합니다. 이 파일과 확인 기록은 Git에서 제외되며 실제 이름을 소스·테스트·Pages 산출물에 포함하지 않습니다. 운영 Pi SSH가 닿지 않아 아직 운영 DB에 입력하지 않았습니다. 새 백엔드를 적용한 후 Mac의 프로젝트 루트에서 다음처럼 비공개 표준 입력으로 보낼 수 있습니다.
+운영 Mac에는 사용자 사진과 대조·확인한 2026학년도 1학년 64명(각 반 16명)의 JSON을 `.runtime/roster/2026-grade1.json`에 권한 600으로 보관합니다. 이 파일과 확인 기록은 Git에서 제외되며 실제 이름을 소스·테스트·Pages 산출물에 포함하지 않습니다. 2026-11-15 새 백엔드 배포 후 운영 DB에 입력했고, 각 반 16개 활성 행과 기존 업무 자료의 동일한 해시를 확인했습니다. Mac의 프로젝트 루트에서 다음처럼 비공개 표준 입력으로 재입력할 수 있습니다.
 
 ```sh
 ssh ubuntu@10.150.1.0 'cd /home/ubuntu/seongmin/assignment-alarm && docker compose --env-file .env.pi exec -T web node import-roster.js' < .runtime/roster/2026-grade1.json
