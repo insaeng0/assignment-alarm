@@ -41,6 +41,8 @@ let lockedScope = { target_grade: 2, target_class: 2 };
 let dateAssignment = null;
 let dateActorAtLock;
 let dateWriteFails = false;
+let googleVerificationGate = null;
+let concurrentGoogleChecks = 0;
 const fakePool = {
   on() { return this; },
   async execute(sql, params = []) {
@@ -106,7 +108,11 @@ const fakePool = {
 class FakeGoogleClient {
   async verifyIdToken({ idToken, audience }) {
     assert.equal(audience, 'test-client');
-    const local = idToken === 'owner' ? '26_40' : idToken === 'approved' ? 'approved' : idToken === 'teacher' ? 'studentteacher' : 'attacker';
+    if (googleVerificationGate && idToken.startsWith('rate-concurrent-')) {
+      concurrentGoogleChecks++;
+      await googleVerificationGate;
+    }
+    const local = /^rate-[a-z0-9-]+$/.test(idToken) ? idToken : idToken === 'owner' ? '26_40' : idToken === 'approved' ? 'approved' : idToken === 'teacher' ? 'studentteacher' : 'attacker';
     return { getPayload: () => ({ sub: `${local}-sub`, email: `${local}@bssm.hs.kr`, email_verified: true, hd: idToken === 'wrong-hd' ? 'other.example' : idToken === 'missing-hd' ? undefined : 'bssm.hs.kr', name: '기존 관리자 이름' }) };
   }
 }
@@ -149,6 +155,13 @@ test.before(async () => {
 test.after(async () => {
   await new Promise((resolve) => server.close(resolve));
   await fs.rm(imageRoot, { recursive: true, force: true });
+});
+const realNow = Date.now.bind(Date);
+let testClock = realNow();
+test.beforeEach(t => {
+  // Independent scenarios must not share the same account/IP window.
+  testClock += 16 * 60_000;
+  t.mock.method(Date, 'now', () => testClock);
 });
 
 test('public config disables chatbot even with a provider key and supports TLS database options', async () => {
@@ -668,10 +681,144 @@ test('date-write failures roll back without leaking database details and use the
   });
   await withDateFixture(117, {}, async move => {
     const sameDate = { due_date: '2026-11-17', expected_due_date: '2026-11-17' };
-    for (let attempt = 0; attempt < 20; attempt++) assert.equal((await move(sameDate)).response.status, 200);
+    for (let attempt = 0; attempt < 120; attempt++) assert.equal((await move(sameDate)).response.status, 200);
     const txBefore = transactionCalls.length;
     const limited = await move(sameDate);
     assert.equal(limited.response.status, 429); assert.ok(Number(limited.response.headers.get('retry-after')) > 0);
     assert.equal(transactionCalls.length, txBefore, 'a rate-limited drag never enters a write transaction');
   });
+});
+
+test('creation bursts share an account budget across tasks and notices without blocking corrections or completion', async () => {
+  await withDateFixture(201, {}, async move => {
+    const sameDate = { due_date: '2026-11-17', expected_due_date: '2026-11-17' };
+    const task = { title: '정상 과제', due_date: '2026-11-17' };
+    const notice = { content: '정상 공지', type: 'class' };
+    for (const [route, body] of [['/api/assignments', task], ['/api/messages', notice], ['/api/assignments', task]]) {
+      assert.equal((await request(route, { method: 'POST', token: session(201), body })).response.status, 200);
+    }
+    const before = queries.length;
+    const blocked = await request('/api/messages', { method: 'POST', token: session(201), body: notice });
+    assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'CREATE_RATE_LIMITED');
+    assert.equal(blocked.response.headers.get('retry-after'), '10');
+    assert.ok(!queries.slice(before).some(query => query.sql.startsWith('INSERT INTO')));
+    for (let index = 0; index < 25; index++) assert.equal((await move(sameDate)).response.status, 200);
+    completionAllowed = true;
+    try {
+      assert.equal((await request('/api/user-assignments', { method: 'PUT', token: session(201), body: { assignment_id: 42, is_completed: true } })).response.status, 200);
+    } finally { completionAllowed = false; }
+  });
+});
+
+test('spaced creation remains limited to twenty per account in the shared ten-minute window', async () => {
+  await withDateFixture(202, {}, async () => {
+    for (let index = 0; index < 20; index++) {
+      if (index && index % 3 === 0) testClock += 10001;
+      const result = await request('/api/messages', { method: 'POST', token: session(202), body: { content: '시간 간격 검증', type: 'class' } });
+      assert.equal(result.response.status, 200);
+    }
+    const blocked = await request('/api/assignments', { method: 'POST', token: session(202), body: { title: '공유 예산 검증', due_date: '2026-11-17' } });
+    assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'CREATE_RATE_LIMITED');
+    assert.ok(Number(blocked.response.headers.get('retry-after')) > 500);
+    testClock += 600000;
+    assert.equal((await request('/api/messages', { method: 'POST', token: session(202), body: { content: '기간 만료', type: 'class' } })).response.status, 200);
+  });
+});
+
+test('verified signup attempts accumulate across successful responses, rotated IPs and forged body identities', async () => {
+  const previousTrust = app.get('trust proxy');
+  app.set('trust proxy', 'loopback');
+  try {
+    const auth = await request('/api/auth/google', { method: 'POST', body: { credential: 'rate-signup' }, headers: { 'X-Forwarded-For': '198.51.100.200' } });
+    assert.equal(auth.response.status, 200); assert.ok(auth.data.setupToken);
+    googleExisting = { ...users.get(1), google_sub: 'rate-signup-sub', google_email: 'rate-signup@bssm.hs.kr' };
+    for (let index = 0; index < 20; index++) {
+      const result = await request('/api/auth/google/register', { method: 'POST', headers: { 'X-Forwarded-For': `198.51.100.${index + 1}` },
+        body: { setupToken: auth.data.setupToken, google_sub: 'forged-' + index, google_email: 'forged-' + index + '@bssm.hs.kr' } });
+      assert.equal(result.response.status, 200);
+    }
+    const before = queries.length;
+    const blocked = await request('/api/auth/google/register', { method: 'POST', headers: { 'X-Forwarded-For': '203.0.113.99' }, body: { setupToken: auth.data.setupToken } });
+    assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'REGISTRATION_RATE_LIMITED');
+    assert.equal(blocked.response.headers.get('retry-after'), '900');
+    assert.equal(queries.length, before, 'rejected registration does not query or hash a new password');
+    assert.ok(!blocked.raw.includes('rate-signup'));
+  } finally { googleExisting = null; app.set('trust proxy', previousTrust); }
+});
+
+test('successful Google logins cannot reset the verified account limit by changing IP address', async () => {
+  const previousTrust = app.get('trust proxy'); app.set('trust proxy', 'loopback');
+  googleExisting = { ...users.get(1), google_sub: 'rate-login-sub', google_email: 'rate-login@bssm.hs.kr' };
+  try {
+    for (let index = 0; index < 30; index++) {
+      const result = await request('/api/auth/google', { method: 'POST', body: { credential: 'rate-login', google_sub: 'ignored-' + index }, headers: { 'X-Forwarded-For': `198.51.100.${index + 1}` } });
+      assert.equal(result.response.status, 200);
+    }
+    const blocked = await request('/api/auth/google', { method: 'POST', body: { credential: 'rate-login' }, headers: { 'X-Forwarded-For': '203.0.113.99' } });
+    assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'AUTH_IDENTITY_RATE_LIMITED');
+    assert.equal(blocked.response.headers.get('retry-after'), '900');
+    assert.ok(!blocked.raw.includes('rate-login'));
+  } finally { googleExisting = null; app.set('trust proxy', previousTrust); }
+});
+
+test('many school members can authenticate on one trusted IP while successful setup responses retain its total cap', async () => {
+  const previousTrust = app.get('trust proxy'); app.set('trust proxy', 'loopback');
+  try {
+    for (let index = 0; index < 300; index++) {
+      const result = await request('/api/auth/google', { method: 'POST', body: { credential: 'rate-campus-' + index }, headers: { 'X-Forwarded-For': '198.51.100.240' } });
+      assert.equal(result.response.status, 200, 'verified new members do not accumulate failed logins');
+      assert.equal(result.data.requiresProfile, true);
+    }
+    const blocked = await request('/api/auth/google', { method: 'POST', body: { credential: 'rate-campus-last' }, headers: { 'X-Forwarded-For': '198.51.100.240' } });
+    assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'AUTH_IP_RATE_LIMITED');
+    assert.equal(blocked.response.headers.get('retry-after'), '900');
+  } finally { app.set('trust proxy', previousTrust); }
+});
+
+test('simultaneous legitimate school Google checks are not counted as failed authentications', async () => {
+  const previousTrust = app.get('trust proxy'); app.set('trust proxy', 'loopback');
+  let release;
+  googleVerificationGate = new Promise(resolve => { release = resolve; });
+  concurrentGoogleChecks = 0;
+  const requests = Array.from({ length: 35 }, (_, index) => request('/api/auth/google', {
+    method: 'POST', body: { credential: 'rate-concurrent-' + index }, headers: { 'X-Forwarded-For': '198.51.100.241' }
+  }));
+  try {
+    for (let tick = 0; tick < 200 && concurrentGoogleChecks < 35; tick++) await new Promise(resolve => setTimeout(resolve, 1));
+    const admittedBeforeVerification = concurrentGoogleChecks;
+    release();
+    const results = await Promise.all(requests);
+    assert.equal(admittedBeforeVerification, 35);
+    assert.ok(results.every(result => result.response.status === 200));
+  } finally { release(); await Promise.all(requests); googleVerificationGate = null; app.set('trust proxy', previousTrust); }
+});
+
+test('image limits follow authenticated accounts across IP changes and do not consume the creation budget', async () => {
+  const previousTrust = app.get('trust proxy'); app.set('trust proxy', 'loopback');
+  try {
+    await withDateFixture(203, {}, async () => {
+      for (let index = 0; index < 10; index++) {
+        const result = await request('/api/uploads/assignment-image', { method: 'POST', token: session(203), body: {}, headers: { 'X-Forwarded-For': `198.51.100.${index + 1}` } });
+        assert.equal(result.response.status, 400);
+      }
+      const blocked = await request('/api/uploads/assignment-image', { method: 'POST', token: session(203), body: {}, headers: { 'X-Forwarded-For': '203.0.113.99' } });
+      assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'IMAGE_UPLOAD_RATE_LIMITED');
+      assert.equal(blocked.response.headers.get('retry-after'), '600');
+      assert.equal((await request('/api/messages', { method: 'POST', token: session(203), body: { content: '업로드와 별도 예산', type: 'class' } })).response.status, 200);
+    });
+  } finally { app.set('trust proxy', previousTrust); }
+});
+
+test('untrusted forwarded addresses cannot rotate the failed authentication IP limit or unlock disabled local registration', async () => {
+  const previousTrust = app.get('trust proxy'); app.set('trust proxy', false);
+  try {
+    for (let index = 0; index < 20; index++) {
+      const route = index % 2 ? '/api/auth/login' : '/api/auth/register';
+      const result = await request(route, { method: 'POST', body: { name: 'ignored', is_admin: true }, headers: { 'X-Forwarded-For': `198.51.100.${index + 1}` } });
+      assert.equal(result.response.status, 403);
+    }
+    const blocked = await request('/api/auth/google/register', { method: 'POST', body: { setupToken: 'invalid' }, headers: { 'X-Forwarded-For': '203.0.113.99' } });
+    assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'AUTH_RATE_LIMITED');
+    assert.equal(blocked.response.headers.get('retry-after'), '900');
+  } finally { app.set('trust proxy', previousTrust); }
 });

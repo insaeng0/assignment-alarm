@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { RefreshSessions, refreshSchema } = require('./lib/refresh-sessions');
 const { validateImageDimensions } = require('./lib/image-dimensions');
 const { databaseTimeOptions, installUtcDatabaseSessions } = require('./lib/database-time');
+const { consumeRateLimitAttempt, checkRateLimitAttempt, consumeRateLimitGroup, boundedPositiveInteger } = require('./lib/rate-limit');
 const { rosterSchema, rosterError, normalizeRosterName, studentRosterScope, lookupRoster, publicRosterCandidates } = require('./lib/student-roster');
 
 const app = express();
@@ -75,14 +76,20 @@ const PAGES_ACCESS_MAX_PER_USER = 5;
 const pagesAccessSessions = new Map();
 const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000;
 const AUTH_RATE_LIMIT = 20;
-const AUTH_RATE_MAX_TRACKED_CLIENTS = Math.max(Number.parseInt(process.env.AUTH_RATE_MAX_TRACKED_CLIENTS || '5000', 10) || 5000, 1000);
+const AUTH_RATE_MAX_TRACKED_CLIENTS = Math.max(boundedPositiveInteger(process.env.AUTH_RATE_MAX_TRACKED_CLIENTS, 5000, 5000), 1000);
+const AUTH_TOTAL_IP_RATE_LIMIT = 300;
+const AUTH_IDENTITY_RATE_LIMIT = 30;
+const REGISTRATION_IDENTITY_RATE_LIMIT = 20;
 // AI 챗봇 보관: 현재 실행하지 않습니다. 재활성화 전 인증/비용/개인정보를 다시 검토하세요.
 // const CHATBOT_RATE_WINDOW_MS = Math.max(Number.parseInt(process.env.CHATBOT_RATE_WINDOW_MS || '300000', 10) || 300000, 60000);
 // const CHATBOT_RATE_LIMIT = Math.max(Number.parseInt(process.env.CHATBOT_RATE_LIMIT || '20', 10) || 20, 1);
-const ASSIGNMENT_IMAGE_RATE_WINDOW_MS = Math.max(Number.parseInt(process.env.ASSIGNMENT_IMAGE_RATE_WINDOW_MS || '600000', 10) || 600000, 60000);
-const ASSIGNMENT_IMAGE_RATE_LIMIT = Math.max(Number.parseInt(process.env.ASSIGNMENT_IMAGE_RATE_LIMIT || '10', 10) || 10, 1);
-const ASSIGNMENT_WRITE_RATE_WINDOW_MS = Math.max(Number.parseInt(process.env.ASSIGNMENT_WRITE_RATE_WINDOW_MS || '600000', 10) || 600000, 60000);
-const ASSIGNMENT_WRITE_RATE_LIMIT = Math.max(Number.parseInt(process.env.ASSIGNMENT_WRITE_RATE_LIMIT || '20', 10) || 20, 1);
+const ASSIGNMENT_IMAGE_RATE_WINDOW_MS = Math.max(boundedPositiveInteger(process.env.ASSIGNMENT_IMAGE_RATE_WINDOW_MS, 600000, 86400000), 60000);
+const ASSIGNMENT_IMAGE_RATE_LIMIT = boundedPositiveInteger(process.env.ASSIGNMENT_IMAGE_RATE_LIMIT, 10);
+const ASSIGNMENT_WRITE_RATE_WINDOW_MS = Math.max(boundedPositiveInteger(process.env.ASSIGNMENT_WRITE_RATE_WINDOW_MS, 600000, 86400000), 60000);
+const ASSIGNMENT_CREATE_RATE_LIMIT = boundedPositiveInteger(process.env.ASSIGNMENT_WRITE_RATE_LIMIT, 20);
+const ASSIGNMENT_MUTATION_RATE_LIMIT = 120;
+const ASSIGNMENT_CREATE_BURST_WINDOW_MS = 10000;
+const ASSIGNMENT_CREATE_BURST_LIMIT = 3;
 // AI 챗봇 보관: 현재 실행하지 않습니다. 재활성화 전 인증/비용/개인정보를 다시 검토하세요.
 // const CHATBOT_MAX_MESSAGE_LENGTH = 2000;
 // const CHATBOT_MAX_HISTORY_ITEMS = 10;
@@ -93,11 +100,16 @@ const ASSIGNMENT_WRITE_RATE_LIMIT = Math.max(Number.parseInt(process.env.ASSIGNM
 // const CHATBOT_RETRY_DELAY_MS = Math.max(Number.parseInt(process.env.CHATBOT_RETRY_DELAY_MS || '1500', 10) || 1500, 0);
 // const CHATBOT_RESPONSE_CACHE_TTL_MS = Math.max(Number.parseInt(process.env.CHATBOT_RESPONSE_CACHE_TTL_MS || '45000', 10) || 45000, 5000);
 const authAttempts = new Map();
+const authTotalIpAttempts = new Map();
+const authIdentityAttempts = new Map();
+const registrationIdentityAttempts = new Map();
 const refreshAttempts = new Map();
 // const chatbotAttempts = new Map();
 // const chatbotResponseCache = new Map();
 const assignmentImageAttempts = new Map();
 const assignmentWriteAttempts = new Map();
+const assignmentCreateAttempts = new Map();
+const assignmentCreateBurstAttempts = new Map();
 const adminUserCache = new Map();
 const adminAssignmentCache = new Map();
 const adminMessageCache = new Map();
@@ -963,56 +975,50 @@ async function findUserByGoogleSub(googleSub, connection = pool) {
   return rows[0] || null;
 }
 
-function cleanupExpiredAttempts(store, now = Date.now()) {
-  for (const [key, value] of store.entries()) {
-    if (!value || value.expiresAt <= now) {
-      store.delete(key);
-    }
-  }
-}
-
-function consumeRateLimitAttempt(store, key, { windowMs, limit, maxTrackedClients }, now = Date.now()) {
-  cleanupExpiredAttempts(store, now);
-  const entry = store.get(key);
-  if (!entry || entry.expiresAt <= now) {
-    if (store.size >= maxTrackedClients) {
-      const oldestKey = store.keys().next().value;
-      if (oldestKey !== undefined) {
-        store.delete(oldestKey);
-      }
-    }
-    store.set(key, { count: 1, expiresAt: now + windowMs });
-    return { allowed: true };
-  }
-  if (entry.count >= limit) {
-    return { allowed: false, retryAfterMs: Math.max(entry.expiresAt - now, 1000) };
-  }
-  entry.count += 1;
-  return { allowed: true };
+function rateLimitFailure(res, result, code, message) {
+  res.setHeader('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)));
+  return res.status(429).json({ error: message, code });
 }
 
 function authRateLimit(req, res, next) {
   const key = req.ip || req.socket.remoteAddress || 'unknown';
   const now = Date.now();
-  const result = consumeRateLimitAttempt(
-    authAttempts,
-    key,
-    {
-      windowMs: AUTH_RATE_WINDOW_MS,
-      limit: AUTH_RATE_LIMIT,
-      maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
-    },
-    now
-  );
+  const total = consumeRateLimitAttempt(authTotalIpAttempts, key, {
+    windowMs: AUTH_RATE_WINDOW_MS, limit: AUTH_TOTAL_IP_RATE_LIMIT, maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
+  }, now);
+  if (!total.allowed) return rateLimitFailure(res, total, 'AUTH_IP_RATE_LIMITED', '로그인 요청이 많습니다. 잠시 후 다시 시도해주세요.');
+  const failurePolicy = { windowMs: AUTH_RATE_WINDOW_MS, limit: AUTH_RATE_LIMIT, maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS };
+  const result = checkRateLimitAttempt(authAttempts, key, failurePolicy, now);
   if (!result.allowed) {
-    return res.status(429).json({ error: '잠시 후 다시 시도해주세요.' });
+    return rateLimitFailure(res, result, 'AUTH_RATE_LIMITED', '잠시 후 다시 시도해주세요.');
   }
+  // In-flight Google checks are not failed logins. Counting before their
+  // async verification would deny an otherwise valid classroom login burst.
+  res.once('finish', () => {
+    if (res.statusCode >= 400 && res.statusCode < 500 && res.statusCode !== 429)
+      consumeRateLimitAttempt(authAttempts, key, failurePolicy);
+  });
   next();
 }
 
 function clearAuthRateLimit(req) {
   const key = req.ip || req.socket.remoteAddress || 'unknown';
   authAttempts.delete(key);
+}
+
+function allowVerifiedIdentity(profile, res, registration = false) {
+  // The caller must first verify the Google credential or signed setup token.
+  // Untrusted body email/sub fields never select a rate-limit identity.
+  const key = crypto.createHash('sha256').update(String(profile.google_sub)).digest('hex');
+  const result = consumeRateLimitAttempt(registration ? registrationIdentityAttempts : authIdentityAttempts, key, {
+    windowMs: AUTH_RATE_WINDOW_MS,
+    limit: registration ? REGISTRATION_IDENTITY_RATE_LIMIT : AUTH_IDENTITY_RATE_LIMIT,
+    maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
+  });
+  if (result.allowed) return true;
+  rateLimitFailure(res, result, registration ? 'REGISTRATION_RATE_LIMITED' : 'AUTH_IDENTITY_RATE_LIMITED',
+    registration ? '가입 요청이 많습니다. 잠시 후 다시 시도해주세요.' : '로그인 요청이 많습니다. 잠시 후 다시 시도해주세요.');
+  return false;
 }
 
 // AI 챗봇 보관: 현재 실행하지 않습니다. 재활성화 전 인증/비용/개인정보를 다시 검토하세요.
@@ -1049,10 +1055,25 @@ function assignmentImageRateLimit(req, res, next) {
   );
 
   if (!result.allowed) {
-    res.setHeader('Retry-After', String(Math.ceil((result.retryAfterMs || ASSIGNMENT_IMAGE_RATE_WINDOW_MS) / 1000)));
-    return res.status(429).json({ error: '이미지 업로드 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' });
+    return rateLimitFailure(res, result, 'IMAGE_UPLOAD_RATE_LIMITED', '이미지 업로드 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.');
   }
 
+  next();
+}
+
+function assignmentCreateRateLimit(req, res, next) {
+  const key = `user:${req.user.id}`;
+  const result = consumeRateLimitGroup([
+    { store: assignmentCreateBurstAttempts, key, policy: {
+      windowMs: ASSIGNMENT_CREATE_BURST_WINDOW_MS, limit: ASSIGNMENT_CREATE_BURST_LIMIT,
+      maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
+    } },
+    { store: assignmentCreateAttempts, key, policy: {
+      windowMs: ASSIGNMENT_WRITE_RATE_WINDOW_MS, limit: ASSIGNMENT_CREATE_RATE_LIMIT,
+      maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
+    } }
+  ]);
+  if (!result.allowed) return rateLimitFailure(res, result, 'CREATE_RATE_LIMITED', '과제·공지 등록 요청이 많습니다. 잠시 후 다시 시도해주세요.');
   next();
 }
 
@@ -1063,14 +1084,13 @@ function assignmentWriteRateLimit(req, res, next) {
     key,
     {
       windowMs: ASSIGNMENT_WRITE_RATE_WINDOW_MS,
-      limit: ASSIGNMENT_WRITE_RATE_LIMIT,
+      limit: ASSIGNMENT_MUTATION_RATE_LIMIT,
       maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
     }
   );
 
   if (!result.allowed) {
-    res.setHeader('Retry-After', String(Math.ceil((result.retryAfterMs || ASSIGNMENT_WRITE_RATE_WINDOW_MS) / 1000)));
-    return res.status(429).json({ error: '과제 변경 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' });
+    return rateLimitFailure(res, result, 'WRITE_RATE_LIMITED', '변경 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.');
   }
 
   next();
@@ -1460,6 +1480,10 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
     if (!GOOGLE_CLIENT_ID) return res.status(503).json({ error: '구글 로그인이 아직 설정되지 않았습니다.' });
 
     const profile = await verifyGoogleCredential(credential);
+    if (!allowVerifiedIdentity(profile, res)) return;
+    // A verified school identity also counts as a successful auth check for
+    // first-time members, so a shared campus IP is not treated as failed logins.
+    clearAuthRateLimit(req);
     const existingUser = await findUserByGoogleSub(profile.google_sub);
 
     if (existingUser) {
@@ -1518,6 +1542,10 @@ app.post('/api/auth/google', authRateLimit, async (req, res) => {
       }
     });
   } catch (error) {
+    if (error?.code === 'REFRESH_ISSUANCE_LIMITED' && error.status === 429) {
+      return rateLimitFailure(res, { retryAfterMs: error.retryAfterMs || AUTH_RATE_WINDOW_MS }, error.code,
+        '로그인 요청이 많습니다. 잠시 후 다시 시도해주세요.');
+    }
     if (error?.code === 'ROSTER_UNAVAILABLE') return res.status(503).json({ code: error.code, error: '가입 정보를 불러오지 못했습니다. 잠시 후 다시 시도해주세요.' });
     if (error?.code === 'PAGES_SESSION_CAPACITY') {
       res.setHeader('Retry-After', '60');
@@ -1547,6 +1575,8 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
     if (decoded?.type !== 'google-setup' || !decoded?.profile?.google_sub) {
       return res.status(401).json({ error: '구글 가입 정보가 올바르지 않습니다.' });
     }
+
+    if (!allowVerifiedIdentity(decoded.profile, res, true)) return;
 
     const existingUser = await findUserByGoogleSub(decoded.profile.google_sub);
     if (existingUser) {
@@ -1643,6 +1673,10 @@ app.post('/api/auth/google/register', authRateLimit, async (req, res) => {
       })
     });
   } catch (e) {
+    if (e?.code === 'REFRESH_ISSUANCE_LIMITED' && e.status === 429) {
+      return rateLimitFailure(res, { retryAfterMs: e.retryAfterMs || AUTH_RATE_WINDOW_MS }, e.code,
+        '로그인 요청이 많습니다. 잠시 후 다시 시도해주세요.');
+    }
     if (['ROSTER_SELECTION_REQUIRED', 'ROSTER_SELECTION_INVALID', 'ROSTER_ALREADY_CLAIMED', 'ROSTER_CHANGED', 'PROFILE_CLASS_INVALID'].includes(e?.code)) {
       const message = e.code === 'ROSTER_SELECTION_REQUIRED' ? '본인 이름에 해당하는 반을 선택해주세요.'
         : e.code === 'ROSTER_ALREADY_CLAIMED' ? '이미 연결된 명단입니다. 다른 계정 사용 여부를 확인해주세요.'
@@ -1664,7 +1698,7 @@ function refreshRequestRateLimit(req, res, next) {
   const limit = consumeRateLimitAttempt(refreshAttempts, req.ip || req.socket.remoteAddress || 'unknown', {
     windowMs: 60_000, limit: 1000, maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
   });
-  if (!limit.allowed) { res.setHeader('Retry-After', '60'); return res.status(429).json({ error: '잠시 후 다시 시도해주세요.', code: 'REFRESH_RATE_LIMITED' }); }
+  if (!limit.allowed) return rateLimitFailure(res, limit, 'REFRESH_RATE_LIMITED', '잠시 후 다시 시도해주세요.');
   next();
 }
 app.post('/api/auth/refresh', refreshRequestRateLimit, async (req, res) => {
@@ -1680,7 +1714,8 @@ app.post('/api/auth/refresh', refreshRequestRateLimit, async (req, res) => {
   } catch (error) {
     if (jti) pagesAccessSessions.delete(jti);
     const status = [400, 401, 409, 429, 503].includes(error.status) ? error.status : 503;
-    if (status === 429 || status === 503) res.setHeader('Retry-After', '60');
+    if (status === 429) res.setHeader('Retry-After', String(Math.ceil((error.retryAfterMs || AUTH_RATE_WINDOW_MS) / 1000)));
+    else if (status === 503) res.setHeader('Retry-After', '60');
     return res.status(status).json({ error: status === 401 ? '로그인이 만료되었습니다.' : status === 409 ? '다른 탭에서 로그인 상태를 갱신하고 있습니다.' : '로그인 상태를 갱신하지 못했습니다. 잠시 후 다시 시도해주세요.', code: error.code || 'REFRESH_UNAVAILABLE' });
   }
 });
@@ -2104,7 +2139,7 @@ app.get('/api/assignments', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/assignments', authMiddleware, assignmentWriteRateLimit, async (req, res) => {
+app.post('/api/assignments', authMiddleware, assignmentCreateRateLimit, async (req, res) => {
   try {
     const title = String(req.body.title || '').trim();
     const content = req.body.content === undefined || req.body.content === null ? null : String(req.body.content).trim();
@@ -2362,7 +2397,7 @@ app.get('/api/user-assignments/:userId', authMiddleware, async (req, res) => {
   }
 });
 
-app.put('/api/user-assignments', authMiddleware, async (req, res) => {
+app.put('/api/user-assignments', authMiddleware, assignmentWriteRateLimit, async (req, res) => {
   try {
     const assignmentId = parseInteger(req.body.assignment_id);
     if (!assignmentId) return res.status(400).json({ error: '과제 정보가 올바르지 않습니다.' });
@@ -2526,7 +2561,7 @@ app.get('/api/notifications', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/messages', authMiddleware, assignmentWriteRateLimit, async (req, res) => {
+app.post('/api/messages', authMiddleware, assignmentCreateRateLimit, async (req, res) => {
   try {
     const content = String(req.body.content || '').trim();
     const type = String(req.body.type || '');

@@ -111,7 +111,9 @@ class RefreshSessions {
       const [issued] = await conn.execute('SELECT window_ms, issue_count FROM auth_refresh_issuance WHERE user_id = ? FOR UPDATE', [userId]);
       const reset = !issued[0] || now - Number(issued[0].window_ms) >= RATE_WINDOW_MS;
       const count = reset ? 0 : Number(issued[0].issue_count);
-      if (count >= 20) throw failure('REFRESH_ISSUANCE_LIMITED', 429);
+      if (count >= 20) throw Object.assign(failure('REFRESH_ISSUANCE_LIMITED', 429), {
+        retryAfterMs: Math.max(Number(issued[0].window_ms) + RATE_WINDOW_MS - now, 1000)
+      });
       await conn.execute('INSERT INTO auth_refresh_issuance (user_id, window_ms, issue_count) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE window_ms = VALUES(window_ms), issue_count = VALUES(issue_count)', [userId, reset ? now : Number(issued[0].window_ms), count + 1]);
       const [active] = await conn.execute(
         'SELECT family_id, user_id FROM auth_refresh_families WHERE auth_realm_id = ? AND revoked = 0 AND expires_at_ms > ? ORDER BY created_at_ms, family_id FOR UPDATE',
@@ -180,7 +182,9 @@ class RefreshSessions {
       const resetWindow = now - Number(family.rate_window_ms) >= RATE_WINDOW_MS;
       const windowStart = resetWindow ? now : Number(family.rate_window_ms);
       const count = resetWindow ? 0 : Number(family.rate_count);
-      if (count >= RATE_LIMIT) throw failure('REFRESH_RATE_LIMITED', 429);
+      if (count >= RATE_LIMIT) throw Object.assign(failure('REFRESH_RATE_LIMITED', 429), {
+        retryAfterMs: Math.max(windowStart + RATE_WINDOW_MS - now, 1000)
+      });
       const next = this.nextToken(refreshToken, requestId);
       const nextHash = tokenHash(next);
       const expiresAt = now + INACTIVITY_MS;
