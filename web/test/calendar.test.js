@@ -21,6 +21,7 @@ async function calendar(user, data = fixtures(), options = {}) {
   const nodes = new Map(), listeners = new Map(), writes = [], moves = [], toasts = [], reads = [];
   const cachedReads = [];
   const controls = new Map();
+  const createdElements = [];
   let document;
   const node = id => {
     if (!nodes.has(id)) nodes.set(id, { classList: classes(), style: {}, dataset: {}, innerHTML: '', textContent: '', value: '',
@@ -28,7 +29,22 @@ async function calendar(user, data = fixtures(), options = {}) {
     return nodes.get(id);
   };
   const filterButtons = ['all', 'pending', 'done'].map(value => ({ dataset: { taskFilter: value }, classList: classes(), setAttribute() {}, addEventListener() {} }));
-  document = { getElementById: node, querySelectorAll: () => filterButtons, querySelector: selector => selector === '#modal .modal-content' ? node('modal-content') : controls.get(selector) || null, body: { classList: classes() }, activeElement: node('prior-focus'), addEventListener() {} };
+  const body = { classList: classes(), children: [], appendChild(element) {
+    element.remove(); this.children.push(element); element.parentNode = this; element.isConnected = true; return element;
+  }, removeChild(element) {
+    const index = this.children.indexOf(element);
+    if (index < 0) throw new Error('Element is not a child.');
+    this.children.splice(index, 1); element.parentNode = null; element.isConnected = false; return element;
+  } };
+  document = { getElementById: node, querySelectorAll: () => filterButtons, querySelector: selector => selector === '#modal .modal-content' ? node('modal-content') : controls.get(selector) || null,
+    body, activeElement: node('prior-focus'), addEventListener() {}, createElement(tagName) {
+      const element = { tagName: String(tagName).toUpperCase(), className: '', classList: classes(), style: {}, dataset: {},
+        textContent: '', innerHTML: '', attributes: {}, parentNode: null, isConnected: false,
+        setAttribute(name, value) { this.attributes[name] = String(value); },
+        getBoundingClientRect() { return { x: 0, y: 0, width: 220, height: 48 }; },
+        remove() { if (this.parentNode) this.parentNode.removeChild(this); } };
+      createdElements.push(element); return element;
+    } };
   const API = {
     requireAuth() {}, getUser: () => user, ensureUser: async () => null, loadUserInfo() {},
     escapeHTML: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
@@ -46,7 +62,7 @@ async function calendar(user, data = fixtures(), options = {}) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/calendar.js'), 'utf8'), context);
   await new Promise(setImmediate);
   if (!options.skipLoad) await vm.runInContext('loadAssignments()', context);
-  return { context, document, controls, nodes, listeners, writes, moves, reads, cachedReads, toasts, API, data, run: code => vm.runInContext(code, context) };
+  return { context, document, controls, createdElements, nodes, listeners, writes, moves, reads, cachedReads, toasts, API, data, run: code => vm.runInContext(code, context) };
 }
 
 function deferred() {
@@ -670,6 +686,84 @@ test('rerendering the calendar cancels an active native drag before replacing it
   assert.equal(app.moves.length, 0);
   assert.equal(app.run('assignments[0].due_date'), day);
   assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+});
+
+test('ordinary own-task and admin drags share an attached custom preview with an unparsed title', async () => {
+  const previews = [];
+  const title = '<img src=x onerror="unexpected()"> 과제 & 확인';
+  for (const is_admin of [false, true]) {
+    const data = moveFixtures(); data[0].title = title;
+    const app = await calendar({ id: 11, is_admin, can_complete_assignments: true, grade: 1, class_number: 2 }, data);
+    const tag = { dataset: { moveId: '1' }, closest: selector => selector === '[data-move-id]' ? tag : null };
+    const calls = [];
+    const dataTransfer = { setData() {}, setDragImage(element, x, y) {
+      calls.push({ element, x, y, connected: element.isConnected, parent: element.parentNode });
+    } };
+    let prevented = false;
+    app.listeners.get('calendarBody:dragstart')({ target: tag, dataTransfer, preventDefault() { prevented = true; } });
+    assert.equal(prevented, false);
+    assert.equal(app.run('draggedAssignment.id'), 1);
+    assert.equal(calls.length, 1);
+    const { element, x, y, connected, parent } = calls[0];
+    assert.equal(element.tagName, 'DIV');
+    assert.equal(element.className, 'calendar-drag-preview');
+    assert.equal(connected, true, 'the browser receives an attached element as its drag image');
+    assert.equal(parent, app.document.body);
+    assert.deepEqual([x, y], [12, 18]);
+    assert.equal(element.textContent, title);
+    assert.equal(element.innerHTML, '', 'the title must be assigned as text instead of HTML');
+    assert.equal(app.run('calendarDragPreview'), element);
+    assert.deepEqual(app.document.body.children, [element]);
+    previews.push({ className: element.className, textContent: element.textContent });
+  }
+  assert.deepEqual(previews[0], previews[1]);
+});
+
+test('custom drag previews are removed on drop, dragend, rerender and scope cancellation', async () => {
+  for (const cleanup of ['drop', 'end', 'render', 'scope']) {
+    const user = { id: 11, is_admin: false, can_complete_assignments: true, grade: 1, class_number: 2 };
+    const app = await calendar(user, moveFixtures());
+    const tag = { dataset: { moveId: '1' }, closest: selector => selector === '[data-move-id]' ? tag : null };
+    let preview;
+    const dataTransfer = { setData() {}, setDragImage(element) { preview = element; } };
+    app.listeners.get('calendarBody:dragstart')({ target: tag, dataTransfer, preventDefault() {} });
+    assert.equal(preview.isConnected, true);
+    if (cleanup === 'drop') {
+      const date = { dataset: { date: shiftedDay(1) }, closest: selector => selector === '[data-date]' ? date : null };
+      app.listeners.get('calendarBody:drop')({ target: date, dataTransfer, preventDefault() {} });
+      await new Promise(setImmediate);
+    } else if (cleanup === 'end') app.listeners.get('calendarBody:dragend')();
+    else if (cleanup === 'render') app.run('renderCalendar()');
+    else { user.class_number = 3; app.run('synchronizeViewScope()'); }
+    assert.equal(preview.isConnected, false, cleanup);
+    assert.equal(preview.parentNode, null, cleanup);
+    assert.equal(app.document.body.children.length, 0, cleanup);
+    assert.equal(app.run('calendarDragPreview'), null, cleanup);
+    assert.equal(app.run('draggedAssignment'), null, cleanup);
+  }
+});
+
+test('unsupported or failing custom drag images retain a valid native drag and leave no preview element', async () => {
+  for (const support of ['missing', 'throws']) {
+    const app = await calendar({ id: 11, is_admin: false, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+    const tag = { dataset: { moveId: '1' }, closest: selector => selector === '[data-move-id]' ? tag : null };
+    const dataTransfer = { setData() {} };
+    if (support === 'throws') dataTransfer.setDragImage = () => { throw new Error('Browser rejected the preview.'); };
+    let prevented = false;
+    app.listeners.get('calendarBody:dragstart')({ target: tag, dataTransfer, preventDefault() { prevented = true; } });
+    assert.equal(prevented, false);
+    assert.equal(app.run('draggedAssignment.id'), 1);
+    assert.equal(dataTransfer.effectAllowed, 'move');
+    assert.equal(app.document.body.children.length, 0);
+    assert.equal(app.run('calendarDragPreview'), null);
+    assert.equal(app.createdElements.length, support === 'missing' ? 0 : 1);
+    const date = { dataset: { date: shiftedDay(1) }, closest: selector => selector === '[data-date]' ? date : null };
+    app.listeners.get('calendarBody:drop')({ target: date, dataTransfer, preventDefault() {} });
+    await new Promise(setImmediate);
+    assert.equal(app.moves.length, 1);
+    assert.equal(app.run('assignments[0].due_date'), shiftedDay(1));
+    assert.equal(app.document.body.children.length, 0);
+  }
 });
 
 for (const outcome of ['success', 'failure', 'conflict']) {

@@ -21,6 +21,7 @@ let localViewScope = null;
 let viewScopeInitialized = false;
 let draggedAssignment = null;
 let dragOverDay = null;
+let calendarDragPreview = null;
 let suppressCalendarClickUntil = 0;
 function calendarViewScope(user = API.getUser()) {
   if (!user?.id) return null;
@@ -428,10 +429,30 @@ async function moveAssignmentDate(id, nextDueDate, expectedDate) {
 }
 
 function clearCalendarDrag() {
+  calendarDragPreview?.remove();
+  calendarDragPreview = null;
   dragOverDay?.classList.remove('drop-target');
   dragOverDay = null;
   draggedAssignment = null;
   document.getElementById('calendarBody').classList.remove('is-dragging');
+}
+function setCalendarDragPreview(task, dataTransfer) {
+  if (typeof dataTransfer.setDragImage !== 'function') return;
+  const preview = document.createElement('div');
+  preview.className = 'calendar-drag-preview';
+  preview.textContent = String(task.title || '과제');
+  preview.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(preview);
+  calendarDragPreview = preview;
+  try {
+    // A separate rendered element avoids clipping the native preview to the
+    // small calendar tag or inheriting its surrounding date button.
+    preview.getBoundingClientRect();
+    dataTransfer.setDragImage(preview, 12, 18);
+  } catch {
+    preview.remove();
+    calendarDragPreview = null;
+  }
 }
 function activeDraggedTask() {
   const drag = draggedAssignment;
@@ -452,6 +473,7 @@ document.getElementById('calendarBody').addEventListener('dragstart', (event) =>
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', String(id));
   document.getElementById('calendarBody').classList.add('is-dragging');
+  setCalendarDragPreview(task, event.dataTransfer);
 });
 document.getElementById('calendarBody').addEventListener('dragover', (event) => {
   if (!activeDraggedTask()) return;
