@@ -910,3 +910,19 @@ test('a failed remembered-login refresh can recover its old connection without d
   assert.equal(f.indexedDB.records.size, 1);
   assert.match(app.window.location.replaced, /__connection=/);
 });
+
+test('calendar date move sends only date and expected date and preserves the approved conflict payload', async () => {
+  const requests = [];
+  const { api } = createAPI({ fetch: async (url, options) => {
+    requests.push({ url, ...options });
+    return response({ success: false, code: 'ASSIGNMENT_DATE_CONFLICT', error: 'changed', due_date: '2026-11-25', private_value: 'hidden' }, 409);
+  } });
+  const result = await api.moveAssignment(7, '2026-11-24', '2026-11-23');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://school.example/api/assignments/7/due-date');
+  assert.equal(requests[0].method, 'PUT');
+  assert.deepEqual(JSON.parse(requests[0].body), { due_date: '2026-11-24', expected_due_date: '2026-11-23' });
+  assert.equal(result.status, 409);
+  assert.equal(result.due_date, '2026-11-25');
+  assert.equal(result.private_value, undefined);
+});

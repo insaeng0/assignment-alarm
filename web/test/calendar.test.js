@@ -18,7 +18,7 @@ const fixtures = () => [
 ];
 
 async function calendar(user, data = fixtures(), options = {}) {
-  const nodes = new Map(), listeners = new Map(), writes = [], toasts = [], reads = [];
+  const nodes = new Map(), listeners = new Map(), writes = [], moves = [], toasts = [], reads = [];
   const cachedReads = [];
   const controls = new Map();
   let document;
@@ -36,6 +36,7 @@ async function calendar(user, data = fixtures(), options = {}) {
     getAssignments: async () => { reads.push('admin'); return data; },
     getUserAssignmentsWithDetails: async () => { reads.push('student'); return data; },
     toggleAssignment: async (id, completed) => { writes.push({ id, completed }); return { success: true }; },
+    moveAssignment: async (id, dueDate, expectedDueDate) => { moves.push({ id, dueDate, expectedDueDate }); return { success: true, due_date: dueDate }; },
     deleteAssignment: async () => ({ success: true }),
     refreshNotifications: async () => {}
   };
@@ -45,13 +46,21 @@ async function calendar(user, data = fixtures(), options = {}) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/js/calendar.js'), 'utf8'), context);
   await new Promise(setImmediate);
   if (!options.skipLoad) await vm.runInContext('loadAssignments()', context);
-  return { context, document, controls, nodes, listeners, writes, reads, cachedReads, toasts, API, data, run: code => vm.runInContext(code, context) };
+  return { context, document, controls, nodes, listeners, writes, moves, reads, cachedReads, toasts, API, data, run: code => vm.runInContext(code, context) };
 }
 
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
+}
+function shiftedDay(offset) {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  return localDate(date);
+}
+function moveFixtures() {
+  return fixtures().map((task, index) => ({ ...task, created_by: index === 0 || index === 2 ? 11 : 22 }));
 }
 function rowControls(app, id, checked = true) {
   const meta = { textContent: '' };
@@ -65,6 +74,23 @@ function rowControls(app, id, checked = true) {
   app.controls.set(`.modal-submit-toggle[data-id="${id}"]`, checkbox);
   app.controls.set(`.modal-delete[data-id="${id}"]`, deletion);
   return { checkbox, deletion, meta, row };
+}
+function modalDateControls(app, id, value = day) {
+  const input = { value, disabled: false, isConnected: true, dataset: { id: String(id) }, classList: classes(),
+    closest: selector => selector === '.modal-move-date' ? input : selector === '.modal-move-form' ? form : null,
+    focus() { app.document.activeElement = this; } };
+  const save = { disabled: false, isConnected: true, dataset: { id: String(id) }, classList: classes(),
+    closest: selector => selector === '.modal-move-save' ? save : selector === '.modal-move-form' ? form : null,
+    focus() { app.document.activeElement = this; } };
+  const form = { dataset: { id: String(id) }, querySelector: selector => selector === '.modal-move-date' ? input : null };
+  input.classList.add('modal-move-date'); save.classList.add('modal-move-save');
+  app.controls.set(`.modal-move-date[data-id="${id}"]`, input);
+  app.controls.set(`.modal-move-save[data-id="${id}"]`, save);
+  return { input, save, form };
+}
+function renderedDateInput(app, id) {
+  return (app.nodes.get('taskList').innerHTML.match(/<input\b[^>]*>/g) || [])
+    .find(tag => tag.includes('modal-move-date') && tag.includes(`data-id="${id}"`)) || '';
 }
 
 test('student and student-admin completion permission is confined to their own class and grade-wide tasks', async () => {
@@ -427,5 +453,287 @@ test('late calendar reads and failed writes cannot restore another account or fo
     assert.equal(app.run('assignments.length'), 0);
     assert.equal(app.run('pendingAssignmentOperations.size'), 0);
     assert.ok(!app.nodes.get('calendarBody').innerHTML.includes('내 반 과제'));
+  }
+});
+
+test('date-move permission and native draggable markup are confined to editable assignments', async () => {
+  for (const is_admin of [false, true]) {
+    const data = moveFixtures();
+    data[1] = { ...data[1], target_class: 2, is_completed: 0 };
+    const app = await calendar({ id: 11, is_admin, can_complete_assignments: true, grade: 1, class_number: 2 }, data);
+    assert.equal(app.run('canMoveAssignment(API.getUser(), assignments[0])'), true);
+    assert.equal(app.run('canMoveAssignment(API.getUser(), assignments[1])'), is_admin);
+    assert.equal(app.run('canMoveAssignment(API.getUser(), assignments[2])'), is_admin, 'an authored task in a former class is not editable as a student');
+    assert.equal(app.run('canMoveAssignment(API.getUser(), assignments[3])'), is_admin);
+    assert.equal(app.run('canMoveAssignment(null, assignments[0])'), false);
+    const html = app.nodes.get('calendarBody').innerHTML;
+    const own = html.match(/<[^>]*data-move-id="1"[^>]*>/)?.[0];
+    const other = html.match(/<[^>]*data-move-id="2"[^>]*>/)?.[0];
+    assert.match(own || '', /draggable="true"/);
+    assert.match(other || '', new RegExp(`draggable="${is_admin ? 'true' : 'false'}"`));
+  }
+});
+
+test('unauthorized, missing, invalid and unchanged date moves never send a request or change data', async () => {
+  const app = await calendar({ id: 11, is_admin: false, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const before = app.run('JSON.stringify(assignments)');
+  for (const [id, date] of [[2, shiftedDay(1)], [3, shiftedDay(1)], [4, shiftedDay(1)], [999, shiftedDay(1)], [1, '2026-02-30'], [1, 'not-a-date'], [1, day]]) {
+    await app.run(`moveAssignmentDate(${id}, ${JSON.stringify(date)})`);
+  }
+  await app.run(`moveAssignmentDate(1, '${shiftedDay(1)}', '${shiftedDay(-1)}')`);
+  assert.equal(app.moves.length, 0);
+  assert.equal(app.run('JSON.stringify(assignments)'), before);
+});
+
+test('date moves paint optimistically and block overlapping move, completion and delete writes for that assignment', async () => {
+  const app = await calendar({ id: 11, is_admin: false, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const response = deferred(), nextDate = shiftedDay(1);
+  let calls = 0, completionCalls = 0, deleteCalls = 0, args;
+  app.API.moveAssignment = (...values) => { calls++; args = values; return response.promise; };
+  app.API.toggleAssignment = async () => { completionCalls++; return { success: true }; };
+  app.API.deleteAssignment = async () => { deleteCalls++; return { success: true }; };
+  const moving = app.run(`moveAssignmentDate(1, '${nextDate}')`);
+  assert.equal(app.run('assignments[0].due_date'), nextDate);
+  assert.equal(app.data[0].due_date, day, 'optimistic edits must not mutate a GET/cache payload');
+  assert.equal(app.run('pendingAssignmentOperations.size'), 1);
+  assert.deepEqual(args, [1, nextDate, day]);
+  assert.ok(app.toasts.some(toast => /저장 중/.test(toast.message)));
+  await app.run(`moveAssignmentDate(1, '${shiftedDay(2)}')`);
+  const controls = rowControls(app, 1);
+  await app.listeners.get('taskList:change')({ target: controls.checkbox });
+  await app.listeners.get('taskList:click')({ target: controls.deletion });
+  assert.equal(calls, 1);
+  assert.equal(completionCalls, 0);
+  assert.equal(deleteCalls, 0);
+  assert.equal(app.run('assignments[0].due_date'), nextDate);
+  response.resolve({ success: true, due_date: nextDate });
+  await moving;
+  assert.equal(app.run('assignments[0].due_date'), nextDate);
+  assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+});
+
+test('a failed date move rolls back only its assignment while another move stays confirmed', async () => {
+  const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const first = deferred(), second = deferred(), oneDate = shiftedDay(1), twoDate = shiftedDay(2);
+  app.API.moveAssignment = id => id === 1 ? first.promise : second.promise;
+  const movingOne = app.run(`moveAssignmentDate(1, '${oneDate}')`);
+  const movingTwo = app.run(`moveAssignmentDate(2, '${twoDate}')`);
+  assert.deepEqual(Array.from(app.run('assignments.slice(0, 2).map(task => task.due_date)')), [oneDate, twoDate]);
+  second.resolve({ success: true, due_date: twoDate }); await movingTwo;
+  first.resolve({ success: false, error: '날짜 저장 실패' }); await movingOne;
+  assert.deepEqual(Array.from(app.run('assignments.map(task => task.due_date)')), [day, twoDate, day, day]);
+  assert.deepEqual(Array.from(app.run('assignments.map(task => task.is_completed)')), [0, 1, 1, 1]);
+  assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+  assert.equal(app.toasts.at(-1).error, true);
+});
+
+test('a date conflict adopts the authoritative server date instead of silently restoring the old date', async () => {
+  const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const response = deferred(), serverDate = shiftedDay(3);
+  app.API.moveAssignment = () => response.promise;
+  const moving = app.run(`moveAssignmentDate(1, '${shiftedDay(1)}')`);
+  response.resolve({ success: false, status: 409, code: 'ASSIGNMENT_DATE_CONFLICT', due_date: serverDate, error: '다른 사용자가 날짜를 변경했습니다.' });
+  await moving;
+  assert.equal(app.run('assignments[0].due_date'), serverDate);
+  assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+  assert.equal(app.toasts.at(-1).error, true);
+});
+
+test('a late read started before a date move cannot undo the optimistic or confirmed date', async () => {
+  const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const read = deferred(), response = deferred(), nextDate = shiftedDay(1);
+  app.API.getAssignments = () => read.promise;
+  const loading = app.run('loadAssignments()');
+  app.API.moveAssignment = () => response.promise;
+  const moving = app.run(`moveAssignmentDate(1, '${nextDate}')`);
+  read.resolve(moveFixtures()); await loading;
+  assert.equal(app.run('assignments[0].due_date'), nextDate);
+  response.resolve({ success: true, due_date: nextDate }); await moving;
+  assert.equal(app.run('assignments[0].due_date'), nextDate);
+});
+
+test('a load during a pending date move preserves its patch and a failure restores the latest server date and content', async () => {
+  const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const response = deferred(), nextDate = shiftedDay(1), serverDate = shiftedDay(3);
+  app.API.moveAssignment = () => response.promise;
+  const moving = app.run(`moveAssignmentDate(1, '${nextDate}')`);
+  const latest = moveFixtures(); latest[0].due_date = serverDate; latest[0].title = '최신 과제 설명';
+  app.API.getAssignments = async () => latest;
+  await app.run('loadAssignments()');
+  assert.equal(app.run('assignments[0].due_date'), nextDate);
+  assert.equal(app.run('assignments[0].title'), '최신 과제 설명');
+  assert.equal(latest[0].due_date, serverDate);
+  response.resolve({ success: false, error: '일시적인 연결 실패' }); await moving;
+  assert.equal(app.run('assignments[0].due_date'), serverDate);
+  assert.equal(app.run('assignments[0].title'), '최신 과제 설명');
+});
+
+test('a date-move failure cannot resurrect an assignment absent from a newer authoritative load', async () => {
+  const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const response = deferred();
+  app.API.moveAssignment = () => response.promise;
+  const moving = app.run(`moveAssignmentDate(1, '${shiftedDay(1)}')`);
+  app.API.getAssignments = async () => moveFixtures().filter(task => task.assignment_id !== 1);
+  await app.run('loadAssignments()');
+  response.resolve({ success: false, error: '이미 삭제된 과제' }); await moving;
+  assert.deepEqual(Array.from(app.run('assignments.map(task => task.assignment_id)')), [2, 3, 4]);
+  assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+});
+
+test('late date-move success, conflicts and failures cannot mutate a new account, class or role view', async () => {
+  for (const patch of [{ id: 90 }, { grade: 2, class_number: 3 }, { is_admin: false }]) {
+    for (const result of [
+      { success: true, due_date: shiftedDay(1) },
+      { success: false, status: 409, code: 'ASSIGNMENT_DATE_CONFLICT', due_date: shiftedDay(3), error: '늦은 충돌' },
+      { success: false, error: '늦은 실패' }
+    ]) {
+      const user = { id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 };
+      const app = await calendar(user, moveFixtures());
+      const response = deferred(); app.API.moveAssignment = () => response.promise;
+      const moving = app.run(`moveAssignmentDate(1, '${shiftedDay(1)}')`);
+      Object.assign(user, patch);
+      const replacement = [{ ...moveFixtures()[0], title: '새 조회 범위의 과제', target_grade: user.grade, target_class: user.class_number, due_date: shiftedDay(5) }];
+      app.API.getAssignments = app.API.getUserAssignmentsWithDetails = async () => replacement;
+      await app.run('loadAssignments()');
+      response.resolve(result); await moving;
+      assert.equal(app.run('assignments.length'), 1);
+      assert.equal(app.run('assignments[0].title'), '새 조회 범위의 과제');
+      assert.equal(app.run('assignments[0].due_date'), shiftedDay(5));
+      assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+    }
+  }
+});
+
+test('native dragging moves the selected task, clears drop affordances and suppresses the trailing calendar click', async () => {
+  const app = await calendar({ id: 11, is_admin: false, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const response = deferred(), nextDate = shiftedDay(1), transferred = [];
+  app.API.moveAssignment = (...values) => { app.moves.push(values); return response.promise; };
+  const tag = { dataset: { moveId: '1' }, closest: selector => selector === '[data-move-id]' ? tag : null };
+  const date = { dataset: { date: nextDate }, classList: classes(), contains: () => false, closest: selector => selector === '[data-date]' ? date : null };
+  const dataTransfer = { setData: (...values) => transferred.push(values) };
+  let startPrevented = false, dropPrevented = false, overPrevented = false, clickPrevented = false;
+  app.listeners.get('calendarBody:dragstart')({ target: tag, dataTransfer, preventDefault() { startPrevented = true; } });
+  assert.equal(startPrevented, false);
+  assert.deepEqual(transferred, [['text/plain', '1']]);
+  assert.equal(dataTransfer.effectAllowed, 'move');
+  assert.equal(app.nodes.get('calendarBody').classList.contains('is-dragging'), true);
+  app.listeners.get('calendarBody:dragover')({ target: date, dataTransfer, preventDefault() { overPrevented = true; } });
+  assert.equal(overPrevented, true);
+  assert.equal(date.classList.contains('drop-target'), true);
+  app.listeners.get('calendarBody:drop')({ target: date, dataTransfer, preventDefault() { dropPrevented = true; } });
+  assert.equal(dropPrevented, true);
+  assert.equal(app.run('assignments[0].due_date'), nextDate);
+  assert.deepEqual(app.moves, [[1, nextDate, day]]);
+  assert.equal(date.classList.contains('drop-target'), false);
+  assert.equal(app.nodes.get('calendarBody').classList.contains('is-dragging'), false);
+  app.listeners.get('calendarBody:click')({ target: date, preventDefault() { clickPrevented = true; } });
+  assert.equal(clickPrevented, true);
+  assert.equal(app.run('modalDate'), null);
+  response.resolve({ success: true, due_date: nextDate });
+  await new Promise(setImmediate);
+  assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+});
+
+test('injected unauthorized drags, changed task dates and changed account scope cannot start a date write', async () => {
+  for (const change of ['unauthorized', 'date', 'scope']) {
+    const user = { id: 11, is_admin: false, can_complete_assignments: true, grade: 1, class_number: 2 };
+    const app = await calendar(user, moveFixtures());
+    const id = change === 'unauthorized' ? 3 : 1;
+    const tag = { dataset: { moveId: String(id) }, closest: selector => selector === '[data-move-id]' ? tag : null };
+    const date = { dataset: { date: shiftedDay(2) }, classList: classes(), closest: selector => selector === '[data-date]' ? date : null };
+    let prevented = false;
+    app.listeners.get('calendarBody:dragstart')({ target: tag, dataTransfer: { setData() {} }, preventDefault() { prevented = true; } });
+    assert.equal(prevented, change === 'unauthorized');
+    if (change === 'date') app.run(`assignments[0].due_date = '${shiftedDay(1)}'`);
+    if (change === 'scope') user.class_number = 3;
+    app.listeners.get('calendarBody:drop')({ target: date, preventDefault() {} });
+    assert.equal(app.moves.length, 0);
+    assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+    assert.equal(app.run('draggedAssignment'), null);
+  }
+});
+
+test('rerendering the calendar cancels an active native drag before replacing its task elements', async () => {
+  const app = await calendar({ id: 11, is_admin: false, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const tag = { dataset: { moveId: '1' }, closest: selector => selector === '[data-move-id]' ? tag : null };
+  const date = { dataset: { date: shiftedDay(1) }, classList: classes(), contains: () => false, closest: selector => selector === '[data-date]' ? date : null };
+  const dataTransfer = { setData() {} };
+  app.listeners.get('calendarBody:dragstart')({ target: tag, dataTransfer, preventDefault() {} });
+  app.listeners.get('calendarBody:dragover')({ target: date, dataTransfer, preventDefault() {} });
+  assert.equal(app.run('draggedAssignment.id'), 1);
+  assert.equal(date.classList.contains('drop-target'), true);
+  app.run('renderCalendar()');
+  assert.equal(app.run('draggedAssignment'), null);
+  assert.equal(date.classList.contains('drop-target'), false);
+  assert.equal(app.nodes.get('calendarBody').classList.contains('is-dragging'), false);
+  app.listeners.get('calendarBody:drop')({ target: date, dataTransfer, preventDefault() {} });
+  assert.equal(app.moves.length, 0);
+  assert.equal(app.run('assignments[0].due_date'), day);
+  assert.equal(app.run('pendingAssignmentOperations.size'), 0);
+});
+
+for (const outcome of ['success', 'failure', 'conflict']) {
+  test(`modal date input and save button regain focus after a ${outcome} replaces their controls`, async () => {
+    for (const focused of ['input', 'save']) {
+      const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+      app.run(`openModal('${day}')`);
+      const first = modalDateControls(app, 1);
+      first[focused].focus();
+      const response = deferred(), nextDate = shiftedDay(1), serverDate = shiftedDay(3);
+      app.API.moveAssignment = () => response.promise;
+      const moving = app.run(`moveAssignmentDate(1, '${nextDate}')`);
+      assert.equal(app.run('modalDate'), nextDate, 'the modal follows the optimistic date');
+      first.input.isConnected = first.save.isConnected = false;
+      first.input.disabled = first.save.disabled = true;
+      const expectedDate = outcome === 'failure' ? day : outcome === 'conflict' ? serverDate : nextDate;
+      const replacement = modalDateControls(app, 1, expectedDate);
+      app.document.activeElement = app.nodes.get('modal-content');
+      response.resolve(outcome === 'success' ? { success: true, due_date: nextDate }
+        : outcome === 'conflict' ? { success: false, status: 409, code: 'ASSIGNMENT_DATE_CONFLICT', due_date: serverDate, error: '동시 변경' }
+          : { success: false, error: '날짜 저장 실패' });
+      await moving;
+      assert.equal(app.run('modalDate'), expectedDate);
+      assert.equal(app.run('assignments[0].due_date'), expectedDate);
+      assert.equal(app.document.activeElement, replacement[focused], 'focus returns from the modal container to the replacement control');
+      assert.ok(renderedDateInput(app, 1).includes(`value="${expectedDate}"`));
+      assert.ok(!renderedDateInput(app, 1).includes(' disabled'));
+    }
+  });
+}
+
+test('an unfinished date draft survives another assignment save and subsequent modal refreshes', async () => {
+  const app = await calendar({ id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 }, moveFixtures());
+  const response = deferred(), draftDate = shiftedDay(3);
+  app.API.moveAssignment = () => response.promise;
+  // Move A, then open its former day and edit B while A is still saving.
+  const moving = app.run(`moveAssignmentDate(1, '${shiftedDay(1)}')`);
+  app.run(`openModal('${day}')`);
+  const second = modalDateControls(app, 2, draftDate);
+  app.listeners.get('taskList:input')({ target: second.input });
+  assert.equal(app.run('assignmentDateDrafts.get(2).value'), draftDate);
+  assert.equal(app.run('assignments[1].due_date'), day, 'a form draft does not change the saved assignment');
+  response.resolve({ success: true, due_date: shiftedDay(1) }); await moving;
+  assert.ok(renderedDateInput(app, 2).includes(`value="${draftDate}"`));
+  app.run(`openModal('${day}')`);
+  assert.ok(renderedDateInput(app, 2).includes(`value="${draftDate}"`));
+  assert.equal(app.run('assignmentDateDrafts.get(2).previousDueDate'), day);
+});
+
+test('date drafts clear on account, class and role changes rather than entering a new view', async () => {
+  for (const patch of [{ id: 90 }, { class_number: 3 }, { is_admin: false }]) {
+    const user = { id: 11, is_admin: true, can_complete_assignments: true, grade: 1, class_number: 2 };
+    const app = await calendar(user, moveFixtures());
+    app.run(`openModal('${day}')`);
+    const controls = modalDateControls(app, 1, shiftedDay(3));
+    app.listeners.get('taskList:input')({ target: controls.input });
+    assert.equal(app.run('assignmentDateDrafts.size'), 1);
+    Object.assign(user, patch);
+    const replacement = [{ ...moveFixtures()[0], created_by: user.id, target_class: user.class_number, due_date: shiftedDay(5) }];
+    app.API.getAssignments = app.API.getUserAssignmentsWithDetails = async () => replacement;
+    await app.run('loadAssignments()');
+    assert.equal(app.run('assignmentDateDrafts.size'), 0);
+    app.run(`openModal('${shiftedDay(5)}')`);
+    assert.ok(renderedDateInput(app, 1).includes(`value="${shiftedDay(5)}"`));
+    assert.ok(!renderedDateInput(app, 1).includes(`value="${shiftedDay(3)}"`));
   }
 });

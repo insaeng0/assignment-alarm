@@ -38,6 +38,9 @@ const transactionCalls = [];
 let assignmentOwner = 1;
 let initiallyReadScope = { target_grade: 2, target_class: 2 };
 let lockedScope = { target_grade: 2, target_class: 2 };
+let dateAssignment = null;
+let dateActorAtLock;
+let dateWriteFails = false;
 const fakePool = {
   on() { return this; },
   async execute(sql, params = []) {
@@ -48,6 +51,7 @@ const fakePool = {
     }
     if (sql.includes('FROM users WHERE google_sub')) return [googleExisting ? [googleExisting] : []];
     if (sql.includes('FROM users WHERE user_id')) {
+      if (sql.endsWith('FOR SHARE') && dateActorAtLock !== undefined) return [dateActorAtLock ? [{ ...dateActorAtLock }] : []];
       return [users.has(Number(params[0])) ? [users.get(Number(params[0]))] : []];
     }
     if (sql.startsWith('UPDATE users SET is_admin')) return [{ affectedRows: 1 }];
@@ -74,6 +78,13 @@ const fakePool = {
       return [[{ total: users.size }]];
     }
     if (sql.includes('FROM users') && sql.includes('ORDER BY is_admin')) return [[...users.values()]];
+    if (sql.startsWith('SELECT assignment_id, created_by, target_grade, target_class, due_date FROM assignments')) return [dateAssignment ? [{ ...dateAssignment }] : []];
+    if (sql === 'UPDATE assignments SET due_date = ? WHERE assignment_id = ?') {
+      if (dateWriteFails) throw new Error('private database detail during date write');
+      const affectedRows = Number(Boolean(dateAssignment && Number(params[1]) === dateAssignment.assignment_id));
+      if (affectedRows) dateAssignment.due_date = params[0];
+      return [{ affectedRows }];
+    }
     if (sql.startsWith('SELECT created_by, target_grade, target_class FROM assignments')) return [[{ created_by: assignmentOwner, ...initiallyReadScope }]];
     if (sql.startsWith('SELECT sender_id FROM messages')) return [[{ sender_id: assignmentOwner }]];
     if (sql.startsWith('DELETE FROM assignments WHERE assignment_id = ? AND') || sql.startsWith('DELETE FROM messages WHERE message_id = ? AND')) {
@@ -516,4 +527,151 @@ test('deleting a user atomically removes their created assignments and all relat
   assert.deepEqual(transactionCalls.slice(rollbackBefore), ['begin', 'rollback', 'release']);
   assert.equal((await request('/api/admin/users/2', { method: 'DELETE', token: session(2) })).response.status, 400);
   assert.equal((await request('/api/admin/users/3', { method: 'DELETE', token: session(1) })).response.status, 403);
+});
+
+async function withDateFixture(id, userChanges, run) {
+  const previous = users.get(id);
+  const user = { user_id: id, name: '날짜 이동 테스트 학생', grade: 1, class_number: 1, is_admin: 0, ...userChanges };
+  users.set(id, user);
+  dateAssignment = { assignment_id: 42, created_by: id, target_grade: 1, target_class: 1, due_date: '2026-11-17' };
+  const move = (body = { due_date: '2026-11-18', expected_due_date: '2026-11-17' }, options = {}) =>
+    request('/api/assignments/42/due-date', { method: 'PUT', token: session(id), body, ...options });
+  try { await run(move, user); }
+  finally {
+    if (previous) users.set(id, previous); else users.delete(id);
+    dateAssignment = null; dateActorAtLock = undefined; dateWriteFails = false;
+  }
+}
+
+test('date-only movement requires authentication, strict dates and an exact two-field payload', async () => {
+  await withDateFixture(110, {}, async move => {
+    assert.equal((await move(undefined, { token: undefined })).response.status, 401);
+    assert.equal((await move(undefined, { headers: { Origin: 'https://evil.example' } })).response.status, 403);
+    const valid = { due_date: '2026-11-18', expected_due_date: '2026-11-17' };
+    const invalid = [{}, { due_date: valid.due_date }, { expected_due_date: valid.expected_due_date },
+      { ...valid, due_date: '2026-02-30' }, { ...valid, due_date: '2026-13-01' },
+      { ...valid, due_date: '2026-11-18T00:00:00Z' }, { ...valid, due_date: 20261118 },
+      { ...valid, due_date: null }, { ...valid, expected_due_date: '2026-02-30' },
+      { ...valid, expected_due_date: '2026-11-17 extra' }, { ...valid, title: '다른 필드 변경' },
+      { ...valid, created_by: 110, target_grade: 3, target_class: 4, is_admin: true }];
+    const before = queries.length;
+    for (const body of invalid) assert.equal((await move(body)).response.status, 400, JSON.stringify(body));
+    for (const id of ['1abc', '0042', '0', '-1', '9007199254740993']) {
+      assert.equal((await request(`/api/assignments/${id}/due-date`, { method: 'PUT', token: session(110), body: valid })).response.status, 400, id);
+    }
+    assert.ok(!queries.slice(before).some(query => query.sql.startsWith('UPDATE assignments')));
+    assert.equal(dateAssignment.due_date, '2026-11-17');
+  });
+});
+
+test('students move only their own exact current-class assignment and cannot learn a forbidden current date', async () => {
+  await withDateFixture(111, {}, async move => {
+    const before = queries.length, txBefore = transactionCalls.length;
+    const saved = await move();
+    assert.equal(saved.response.status, 200);
+    assert.deepEqual(saved.data, { success: true, due_date: '2026-11-18' });
+    assert.equal(dateAssignment.due_date, '2026-11-18');
+    const writes = queries.slice(before);
+    assert.ok(writes.some(query => query.sql.endsWith('FOR SHARE') && query.params[0] === 111));
+    assert.ok(writes.some(query => query.sql.endsWith('FOR UPDATE') && query.sql.includes('FROM assignments')));
+    assert.deepEqual(writes.find(query => query.sql.startsWith('UPDATE assignments')).params, ['2026-11-18', 42]);
+    assert.ok(!writes.some(query => /(?:INSERT|DELETE|UPDATE).*user_assignments/.test(query.sql)), 'completion rows remain intact');
+    assert.deepEqual(transactionCalls.slice(txBefore), ['begin', 'commit', 'release']);
+    for (const changes of [{ created_by: 999 }, { target_grade: 2 }, { target_class: 2 }, { target_class: null }]) {
+      dateAssignment = { assignment_id: 42, created_by: 111, target_grade: 1, target_class: 1, due_date: '2026-11-19', ...changes };
+      const start = queries.length;
+      const forbidden = await move();
+      assert.equal(forbidden.response.status, 403, JSON.stringify(changes));
+      assert.equal(forbidden.data.due_date, undefined);
+      assert.equal(forbidden.data.code, undefined, 'forbidden access is not a date-conflict oracle');
+      assert.ok(!queries.slice(start).some(query => query.sql.startsWith('UPDATE assignments')));
+    }
+  });
+});
+
+test('active admins can move every assignment regardless of author, class, or completion eligibility', async () => {
+  await withDateFixture(112, { is_admin: 1, google_sub: 'teacher-admin-test', google_email: 'teacher999@bssm.hs.kr' }, async move => {
+    for (const target_class of [1, 4, null]) {
+      dateAssignment = { assignment_id: 42, created_by: 999, target_grade: 3, target_class, due_date: '2026-11-17' };
+      const result = await move();
+      assert.equal(result.response.status, 200);
+      assert.equal(result.data.due_date, '2026-11-18');
+      assert.equal(dateAssignment.created_by, 999); assert.equal(dateAssignment.target_grade, 3); assert.equal(dateAssignment.target_class, target_class);
+    }
+  });
+});
+
+test('owner student mode restricts date movement to owned current-class tasks while admin mode restores global movement', async () => {
+  await withDateFixture(113, { is_admin: 1, admin_mode_enabled: 0, google_sub: '26_40-sub', google_email: '26_40@bssm.hs.kr' }, async (move, owner) => {
+    assert.equal((await move()).response.status, 200);
+    dateAssignment = { assignment_id: 42, created_by: 113, target_grade: 2, target_class: 4, due_date: '2026-11-17' };
+    assert.equal((await move()).response.status, 403);
+    dateAssignment.created_by = 999; dateAssignment.target_grade = 1; dateAssignment.target_class = 1;
+    assert.equal((await move()).response.status, 403);
+    owner.admin_mode_enabled = 1;
+    assert.equal((await move()).response.status, 200);
+  });
+});
+
+test('date movement rechecks locked database authority after authentication and uses the current locked assignment scope', async () => {
+  await withDateFixture(114, { is_admin: 1 }, async (move, user) => {
+    dateAssignment.created_by = 999; dateAssignment.target_grade = 3; dateAssignment.target_class = 4;
+    dateActorAtLock = { ...user, is_admin: 0 };
+    assert.equal((await move()).response.status, 403, 'a role revoked after authentication cannot move other users tasks');
+    dateAssignment.created_by = 114; dateAssignment.target_grade = 1; dateAssignment.target_class = 1;
+    dateActorAtLock = { ...user, is_admin: 0, class_number: 2 };
+    assert.equal((await move()).response.status, 403, 'a freshly changed class is authoritative');
+    dateActorAtLock = { ...user, is_admin: 0 };
+    dateAssignment.target_class = 4;
+    assert.equal((await move()).response.status, 403, 'the locked current assignment scope is authoritative');
+    dateAssignment.target_class = 1;
+    for (const changes of [{ grade: null }, { class_number: null }, { grade: 0 }, { class_number: 0 }, { grade: 4 }, { class_number: 5 }]) {
+      dateActorAtLock = { ...user, is_admin: 0, ...changes };
+      assert.equal((await move()).response.status, 403, JSON.stringify(changes));
+    }
+    dateActorAtLock = { ...user, is_admin: 0, class_number: null };
+    dateAssignment.target_class = null;
+    assert.equal((await move()).response.status, 403, 'null actor class must not match a grade-wide assignment');
+    dateActorAtLock = null;
+    assert.equal((await move()).response.status, 401);
+  });
+});
+
+test('stale drags return only the authorized authoritative date, missing tasks return 404, and unchanged dates are harmless', async () => {
+  await withDateFixture(115, {}, async move => {
+    const original = dateAssignment;
+    dateAssignment = null;
+    assert.equal((await move()).response.status, 404);
+    dateAssignment = original;
+    const before = queries.length;
+    const conflict = await move({ due_date: '2026-11-18', expected_due_date: '2026-11-16' });
+    assert.equal(conflict.response.status, 409); assert.equal(conflict.data.code, 'ASSIGNMENT_DATE_CONFLICT');
+    assert.equal(conflict.data.due_date, '2026-11-17');
+    assert.ok(!queries.slice(before).some(query => query.sql.startsWith('UPDATE assignments')));
+    const unchanged = await move({ due_date: '2026-11-17', expected_due_date: '2026-11-17' });
+    assert.deepEqual(unchanged.data, { success: true, due_date: '2026-11-17' });
+    assert.equal((await move({ due_date: '2028-02-29', expected_due_date: '2026-11-17' })).response.status, 200);
+    const stale = await move();
+    assert.equal(stale.response.status, 409); assert.equal(stale.data.due_date, '2028-02-29');
+    assert.equal(dateAssignment.due_date, '2028-02-29');
+  });
+});
+
+test('date-write failures roll back without leaking database details and use the existing per-user write limit', async () => {
+  await withDateFixture(116, {}, async move => {
+    dateWriteFails = true;
+    const txBefore = transactionCalls.length;
+    const result = await move();
+    assert.equal(result.response.status, 503); assert.ok(!result.raw.includes('private database'));
+    assert.equal(dateAssignment.due_date, '2026-11-17');
+    assert.deepEqual(transactionCalls.slice(txBefore), ['begin', 'rollback', 'release']);
+  });
+  await withDateFixture(117, {}, async move => {
+    const sameDate = { due_date: '2026-11-17', expected_due_date: '2026-11-17' };
+    for (let attempt = 0; attempt < 20; attempt++) assert.equal((await move(sameDate)).response.status, 200);
+    const txBefore = transactionCalls.length;
+    const limited = await move(sameDate);
+    assert.equal(limited.response.status, 429); assert.ok(Number(limited.response.headers.get('retry-after')) > 0);
+    assert.equal(transactionCalls.length, txBefore, 'a rate-limited drag never enters a write transaction');
+  });
 });

@@ -2145,6 +2145,63 @@ app.post('/api/assignments', authMiddleware, assignmentWriteRateLimit, async (re
   }
 });
 
+app.put('/api/assignments/:id/due-date', authMiddleware, assignmentWriteRateLimit, async (req, res) => {
+  const assignmentId = parseInteger(req.params.id);
+  if (!assignmentId || assignmentId < 1 || assignmentId > 2147483647 || String(assignmentId) !== req.params.id) {
+    return res.status(400).json({ success: false, error: '과제 정보가 올바르지 않습니다.' });
+  }
+  const { due_date, expected_due_date } = req.body;
+  if (Object.keys(req.body).some(field => !['due_date', 'expected_due_date'].includes(field))
+      || !isValidDateOnly(due_date) || !isValidDateOnly(expected_due_date)) {
+    return res.status(400).json({ success: false, error: '변경할 마감일과 기존 마감일을 YYYY-MM-DD 형식으로 입력해주세요.' });
+  }
+  try {
+    await withTransaction(async connection => {
+      // Lock current authority as well as the assignment. A concurrent mode or
+      // class change must finish before this read, or wait until this write ends.
+      const [users] = await connection.execute(
+        'SELECT user_id, grade, class_number, google_sub, google_email, is_admin, admin_mode_enabled FROM users WHERE user_id = ? FOR SHARE',
+        [req.user.id]
+      );
+      const user = users[0];
+      if (!user) throw Object.assign(new Error('assignment-date-session-missing'), { status: 401 });
+      const [rows] = await connection.execute(
+        'SELECT assignment_id, created_by, target_grade, target_class, due_date FROM assignments WHERE assignment_id = ? FOR UPDATE',
+        [assignmentId]
+      );
+      const assignment = rows[0];
+      if (!assignment) throw Object.assign(new Error('assignment-not-found'), { status: 404 });
+      if (!isAdminUser(user)) {
+        const grade = parseInteger(user.grade), classNumber = parseInteger(user.class_number);
+        if (!grade || grade < 1 || grade > MAX_GRADE || !classNumber || classNumber < 1 || classNumber > MAX_CLASS
+            || assignment.target_class === null || assignment.target_class === undefined
+            || parseInteger(assignment.created_by) !== req.user.id
+            || parseInteger(assignment.target_grade) !== grade || parseInteger(assignment.target_class) !== classNumber) {
+          throw Object.assign(new Error('assignment-date-forbidden'), { status: 403 });
+        }
+      }
+      // Check only after authorization: a stale drag cannot expose another
+      // class's current date, and cannot overwrite a newer confirmed change.
+      if (assignment.due_date !== expected_due_date) {
+        throw Object.assign(new Error('assignment-date-conflict'), { status: 409, due_date: assignment.due_date });
+      }
+      if (due_date !== assignment.due_date) {
+        await connection.execute('UPDATE assignments SET due_date = ? WHERE assignment_id = ?', [due_date, assignmentId]);
+      }
+    });
+    clearResponseCaches({ assignments: true, notifications: true });
+    return res.json({ success: true, due_date });
+  } catch (error) {
+    if (error?.status === 409) return res.status(409).json({ success: false, code: 'ASSIGNMENT_DATE_CONFLICT',
+      error: '마감일이 다른 곳에서 변경됐어요. 새로고침한 뒤 다시 옮겨주세요.', due_date: error.due_date });
+    if (error?.status === 401) return res.status(401).json({ success: false, error: '로그인 상태를 다시 확인해주세요.' });
+    if (error?.status === 403) return res.status(403).json({ success: false, error: '현재 소속 반에서 본인이 등록한 과제만 옮길 수 있습니다.' });
+    if (error?.status === 404) return res.status(404).json({ success: false, error: '과제를 찾을 수 없습니다.' });
+    logApiError('PUT /api/assignments/:id/due-date failed', error, { assignmentId: req.params.id, actorUserId: req.user?.id });
+    return res.status(503).json({ success: false, error: '마감일을 변경하지 못했습니다. 잠시 후 다시 시도해주세요.' });
+  }
+});
+
 app.put('/api/assignments/:id', authMiddleware, assignmentWriteRateLimit, async (req, res) => {
   try {
     const [rows] = await pool.execute(

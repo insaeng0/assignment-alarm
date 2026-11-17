@@ -15,9 +15,13 @@ let modalAllTasks = false;
 let assignmentGeneration = 0;
 let mutationVersion = 0;
 const pendingAssignmentOperations = new Map();
+const assignmentDateDrafts = new Map();
 let latestMutationFocus = null;
 let localViewScope = null;
 let viewScopeInitialized = false;
+let draggedAssignment = null;
+let dragOverDay = null;
+let suppressCalendarClickUntil = 0;
 function calendarViewScope(user = API.getUser()) {
   if (!user?.id) return null;
   try {
@@ -38,7 +42,9 @@ function synchronizeViewScope(user = API.getUser()) {
   if (nextScope === localViewScope) return false;
   localViewScope = nextScope;
   assignments = []; assignmentsLoaded = false; assignmentsLoading = false; assignmentsError = false;
+  clearCalendarDrag();
   pendingAssignmentOperations.clear(); latestMutationFocus = null;
+  assignmentDateDrafts.clear();
   assignmentGeneration++; mutationVersion++; loadVersion++;
   previousFocus = null;
   if (modalDate) closeModal();
@@ -71,6 +77,19 @@ function taskMeta(task, user) {
 function canDeleteAssignment(user, task) {
   return Boolean(user && task && (user.is_admin || Number(task.created_by) === Number(user.id)));
 }
+function canMoveAssignment(user, task) {
+  if (!user?.id || !task) return false;
+  if (user.is_admin === true) return true;
+  return Number(task.created_by) === Number(user.id)
+    && Number(user.grade) >= 1 && Number(user.class_number) >= 1
+    && Number(task.target_grade) === Number(user.grade)
+    && task.target_class !== null && Number(task.target_class) === Number(user.class_number);
+}
+function validAssignmentDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || Number(value.slice(0, 4)) < 1000) return false;
+  const date = new Date(value + 'T12:00:00');
+  return !Number.isNaN(date.getTime()) && dateString(date) === value;
+}
 function currentOperation(operation) {
   if (!matchesViewScope(operation.viewScope) || pendingAssignmentOperations.get(operation.id) !== operation || operation.generation !== assignmentGeneration
     || String(API.getUser()?.id) !== operation.userId) return false;
@@ -93,7 +112,11 @@ function pendingIncomingAssignments(data, expectedScope = localViewScope) {
         operation.afterId = incoming[index + 1]?.assignment_id;
         incoming.splice(index, 1);
       }
-    } else if (index >= 0 && canCompleteAssignment(API.getUser(), incoming[index])) {
+    } else if (operation.kind === 'move' && index >= 0 && canMoveAssignment(API.getUser(), incoming[index])) {
+      operation.task = incoming[index];
+      operation.previousDueDate = incoming[index].due_date;
+      incoming[index].due_date = operation.nextDueDate;
+    } else if (operation.kind === 'completion' && index >= 0 && canCompleteAssignment(API.getUser(), incoming[index])) {
       operation.task = incoming[index];
       operation.previousCompleted = incoming[index].is_completed;
       incoming[index].is_completed = operation.completed ? 1 : 0;
@@ -106,6 +129,8 @@ function modalFocusSelector(element) {
   if (!/^\d+$/.test(String(element?.dataset?.id || ''))) return null;
   if (element.classList?.contains('modal-submit-toggle')) return `.modal-submit-toggle[data-id="${element.dataset.id}"]`;
   if (element.classList?.contains('modal-delete')) return `.modal-delete[data-id="${element.dataset.id}"]`;
+  if (element.classList?.contains('modal-move-date')) return `.modal-move-date[data-id="${element.dataset.id}"]`;
+  if (element.classList?.contains('modal-move-save')) return `.modal-move-save[data-id="${element.dataset.id}"]`;
   return null;
 }
 function refreshOpenModal() {
@@ -241,6 +266,7 @@ function urgentDate() {
 }
 
 function renderCalendar(forceLoading = assignmentsLoading && !assignmentsLoaded) {
+  clearCalendarDrag();
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
   const user = API.getUser();
@@ -265,7 +291,9 @@ function renderCalendar(forceLoading = assignmentsLoading && !assignmentsLoaded)
     const tags = tasks.slice(0, 2).map((task) => {
       const cls = isCompleted(task) ? 'done' : task.due_date <= threshold ? 'urgent' : 'normal';
       const title = user?.is_admin ? `${taskScopeLabel(task)} · ${task.title}` : task.title;
-      return `<span class="task-tag ${cls}">${API.escapeHTML(title)}</span>`;
+      const movable = canMoveAssignment(user, task) && !pendingAssignmentOperations.has(Number(task.assignment_id));
+      const saving = pendingAssignmentOperations.get(Number(task.assignment_id))?.kind === 'move';
+      return `<span class="task-tag ${cls}${saving ? ' saving' : ''}" data-move-id="${Number(task.assignment_id)}" draggable="${movable}" title="${API.escapeHTML(title + (saving ? ' · 저장 중' : movable ? ' · 드래그해서 날짜 변경' : ''))}"${saving ? ' aria-busy="true"' : ''}>${API.escapeHTML(title)}</span>`;
     }).join('');
     const label = `${month + 1}월 ${d}일${date === today ? ', 오늘' : ''}, 과제 ${tasks.length}개`;
     html += `<button type="button" class="day${date === today ? ' today' : ''}" data-date="${date}" aria-label="${label}"${date === today ? ' aria-current="date"' : ''}><span class="date">${d}</span>${tags}${tasks.length > 2 ? `<span class="task-more">+${tasks.length - 2}개 더</span>` : ''}</button>`;
@@ -313,6 +341,13 @@ function updateOverview(visibleAssignments, loading) {
     : `${user?.is_admin ? '내 반 기준 · ' : ''}${pending.length ? `미제출 과제가 ${pending.length}개 남아 있어요.` : visible.length ? '모든 과제를 제출했어요.' : '제출 체크할 내 반 과제가 없습니다.'}`;
 }
 
+function dateMoveControl(task, user) {
+  if (!canMoveAssignment(user, task)) return '';
+  const id = Number(task.assignment_id);
+  const disabled = pendingAssignmentOperations.has(id) ? ' disabled' : '';
+  const value = assignmentDateDrafts.get(id)?.value ?? task.due_date;
+  return `<form class="modal-move-form" data-id="${id}"><label for="move-date-${id}">마감일</label><input id="move-date-${id}" class="modal-move-date" data-id="${id}" type="date" min="1000-01-01" max="9999-12-31" value="${API.escapeHTML(value)}" required${disabled}><button class="btn btn-secondary btn-sm modal-move-save" data-id="${id}" type="submit"${disabled}>날짜 변경</button></form>`;
+}
 function openModal(date, { allTasks = false, keepFocus = false } = {}) {
   const focusedSelector = keepFocus ? modalFocusSelector(document.activeElement) : null;
   modalDate = date;
@@ -322,7 +357,7 @@ function openModal(date, { allTasks = false, keepFocus = false } = {}) {
   const user = API.getUser();
   const [year, month, day] = date.split('-').map(Number);
   document.getElementById('modalTitle').textContent = `${year}년 ${month}월 ${day}일 과제`;
-  document.getElementById('taskList').innerHTML = tasks.length ? tasks.map((task) => `<div class="assignment-item${isCompleted(task) ? ' done' : ''}"><div class="info"><div class="title">${API.escapeHTML(task.title)}</div>${task.content ? `<div class="detail">${API.renderTextWithLinks(task.content)}</div>` : ''}<div class="meta">${API.escapeHTML(taskMeta(task, user))}</div></div><div class="actions">${canCompleteAssignment(user, task) ? `<label class="submit-check"><input type="checkbox" class="modal-submit-toggle" data-id="${Number(task.assignment_id)}" ${isCompleted(task) ? 'checked' : ''} ${pendingAssignmentOperations.has(Number(task.assignment_id)) ? 'disabled aria-busy="true"' : ''}><span>${user?.is_admin ? '내 제출 완료' : '제출 완료'}</span></label>` : ''}${canDeleteAssignment(user, task) ? `<button type="button" class="btn btn-danger btn-sm modal-delete" data-id="${Number(task.assignment_id)}" ${pendingAssignmentOperations.has(Number(task.assignment_id)) ? 'disabled' : ''}>삭제</button>` : ''}</div></div>`).join('') : '<div class="empty-state">이 날짜에 표시할 과제가 없어요.<br>필터를 확인하거나 새 과제를 등록해보세요.</div><a class="btn btn-primary" href="register.html">새 과제 등록</a>';
+  document.getElementById('taskList').innerHTML = tasks.length ? tasks.map((task) => `<div class="assignment-item${isCompleted(task) ? ' done' : ''}"><div class="info"><div class="title">${API.escapeHTML(task.title)}</div>${task.content ? `<div class="detail">${API.renderTextWithLinks(task.content)}</div>` : ''}<div class="meta">${API.escapeHTML(taskMeta(task, user))}</div>${dateMoveControl(task, user)}</div><div class="actions">${canCompleteAssignment(user, task) ? `<label class="submit-check"><input type="checkbox" class="modal-submit-toggle" data-id="${Number(task.assignment_id)}" ${isCompleted(task) ? 'checked' : ''} ${pendingAssignmentOperations.has(Number(task.assignment_id)) ? 'disabled aria-busy="true"' : ''}><span>${user?.is_admin ? '내 제출 완료' : '제출 완료'}</span></label>` : ''}${canDeleteAssignment(user, task) ? `<button type="button" class="btn btn-danger btn-sm modal-delete" data-id="${Number(task.assignment_id)}" ${pendingAssignmentOperations.has(Number(task.assignment_id)) ? 'disabled' : ''}>삭제</button>` : ''}</div></div>`).join('') : '<div class="empty-state">이 날짜에 표시할 과제가 없어요.<br>필터를 확인하거나 새 과제를 등록해보세요.</div><a class="btn btn-primary" href="register.html">새 과제 등록</a>';
   document.getElementById('modal').classList.add('show');
   document.body.classList.add('modal-open');
   const focusedReplacement = focusedSelector && document.querySelector(focusedSelector);
@@ -337,13 +372,142 @@ function closeModal() {
   else document.getElementById('todayMonth').focus();
 }
 
+async function moveAssignmentDate(id, nextDueDate, expectedDate) {
+  synchronizeViewScope();
+  id = Number(id);
+  const task = assignments.find(item => Number(item.assignment_id) === id);
+  if (!Number.isSafeInteger(id) || id < 1 || !canMoveAssignment(API.getUser(), task)
+    || pendingAssignmentOperations.has(id) || !validAssignmentDate(nextDueDate) || nextDueDate === task.due_date) return false;
+  if (expectedDate !== undefined && expectedDate !== task.due_date) {
+    assignmentDateDrafts.delete(id);
+    refreshOpenModal();
+    AppUI.toast('과제 날짜가 변경되었습니다. 최신 날짜에서 다시 옮겨주세요.', true);
+    return false;
+  }
+  const control = document.activeElement;
+  const operation = { kind: 'move', id, task, previousDueDate: task.due_date, nextDueDate,
+    viewScope: localViewScope, userId: String(API.getUser().id), generation: assignmentGeneration,
+    control, wasFocused: Boolean(modalFocusSelector(control)), focusSelector: modalFocusSelector(control),
+    followModal: modalDate === task.due_date, modalDate: nextDueDate };
+  const expectedDueDate = task.due_date;
+  assignmentDateDrafts.delete(id);
+  pendingAssignmentOperations.set(id, operation);
+  if (operation.wasFocused) latestMutationFocus = operation;
+  mutationVersion++;
+  task.due_date = nextDueDate;
+  if (operation.followModal) modalDate = nextDueDate;
+  renderCalendar(); refreshOpenModal();
+  AppUI.toast('마감일을 옮겼어요. 저장 중입니다.');
+  try {
+    const result = await API.moveAssignment(id, nextDueDate, expectedDueDate);
+    if (!currentOperation(operation)) return false;
+    if (result?.status === 409 && result.code === 'ASSIGNMENT_DATE_CONFLICT' && validAssignmentDate(result.due_date)) {
+      operation.task.due_date = result.due_date;
+      if (operation.followModal && modalDate === nextDueDate) modalDate = operation.modalDate = result.due_date;
+      AppUI.toast('다른 곳에서 마감일이 변경되어 최신 날짜를 표시했어요. 다시 확인해주세요.', true);
+      return false;
+    }
+    if (!result?.success) throw new Error(result?.error || '마감일을 저장하지 못했습니다.');
+    AppUI.toast('마감일이 변경되었습니다.');
+    API.refreshNotifications().catch(() => {});
+    return true;
+  } catch (error) {
+    if (currentOperation(operation) && operation.task) {
+      operation.task.due_date = operation.previousDueDate;
+      if (operation.followModal && modalDate === nextDueDate) modalDate = operation.modalDate = operation.previousDueDate;
+      AppUI.toast(`${error.message || '마감일을 저장하지 못했습니다.'} 이전 날짜로 되돌렸어요.`, true);
+    }
+    return false;
+  } finally {
+    if (matchesViewScope(operation.viewScope) && pendingAssignmentOperations.get(id) === operation) {
+      pendingAssignmentOperations.delete(id); mutationVersion++;
+      if (typeof API.invalidateDataCache === 'function') API.invalidateDataCache();
+      renderCalendar(); refreshOpenModal(); restoreOperationFocus(operation);
+    }
+  }
+}
+
+function clearCalendarDrag() {
+  dragOverDay?.classList.remove('drop-target');
+  dragOverDay = null;
+  draggedAssignment = null;
+  document.getElementById('calendarBody').classList.remove('is-dragging');
+}
+function activeDraggedTask() {
+  const drag = draggedAssignment;
+  if (!drag || !matchesViewScope(drag.viewScope)) return null;
+  const task = assignments.find(item => Number(item.assignment_id) === drag.id);
+  return canMoveAssignment(API.getUser(), task) && !pendingAssignmentOperations.has(drag.id) && task.due_date === drag.dueDate ? task : null;
+}
+document.getElementById('calendarBody').addEventListener('dragstart', (event) => {
+  synchronizeViewScope();
+  clearCalendarDrag();
+  const tag = event.target.closest('[data-move-id]');
+  const id = Number(tag?.dataset.moveId);
+  const task = assignments.find(item => Number(item.assignment_id) === id);
+  if (!tag || !event.dataTransfer || !canMoveAssignment(API.getUser(), task) || pendingAssignmentOperations.has(id)) {
+    event.preventDefault(); return;
+  }
+  draggedAssignment = { id, dueDate: task.due_date, viewScope: localViewScope };
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', String(id));
+  document.getElementById('calendarBody').classList.add('is-dragging');
+});
+document.getElementById('calendarBody').addEventListener('dragover', (event) => {
+  if (!activeDraggedTask()) return;
+  const day = event.target.closest('[data-date]');
+  if (!day || !validAssignmentDate(day.dataset.date)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  if (dragOverDay !== day) {
+    dragOverDay?.classList.remove('drop-target');
+    dragOverDay = day;
+    day.classList.add('drop-target');
+  }
+});
+document.getElementById('calendarBody').addEventListener('dragleave', (event) => {
+  if (dragOverDay && !dragOverDay.contains(event.relatedTarget)) {
+    dragOverDay.classList.remove('drop-target'); dragOverDay = null;
+  }
+});
+document.getElementById('calendarBody').addEventListener('drop', (event) => {
+  const task = activeDraggedTask();
+  const day = event.target.closest('[data-date]');
+  const drag = draggedAssignment;
+  clearCalendarDrag();
+  if (!task || !day) return;
+  event.preventDefault();
+  suppressCalendarClickUntil = Date.now() + 300;
+  void moveAssignmentDate(drag.id, day.dataset.date, drag.dueDate);
+});
+document.getElementById('calendarBody').addEventListener('dragend', () => {
+  clearCalendarDrag();
+  suppressCalendarClickUntil = Date.now() + 300;
+});
 document.getElementById('calendarBody').addEventListener('click', (event) => {
+  if (Date.now() < suppressCalendarClickUntil) { event.preventDefault(); return; }
   const day = event.target.closest('[data-date]');
   if (day && (!assignmentsLoading || assignmentsLoaded)) openModal(day.dataset.date);
 });
 document.getElementById('upcomingList').addEventListener('click', (event) => {
   const item = event.target.closest('[data-date]');
   if (item) openModal(item.dataset.date, { allTasks: true });
+});
+document.getElementById('taskList').addEventListener('submit', (event) => {
+  const form = event.target.closest('.modal-move-form');
+  if (!form) return;
+  event.preventDefault();
+  void moveAssignmentDate(form.dataset.id, form.querySelector('.modal-move-date').value, assignmentDateDrafts.get(Number(form.dataset.id))?.previousDueDate);
+});
+document.getElementById('taskList').addEventListener('input', (event) => {
+  synchronizeViewScope();
+  const input = event.target.closest('.modal-move-date');
+  if (!input) return;
+  const id = Number(input.dataset.id);
+  const task = assignments.find(item => Number(item.assignment_id) === id);
+  if (canMoveAssignment(API.getUser(), task) && !pendingAssignmentOperations.has(id)) {
+    assignmentDateDrafts.set(id, { value: input.value, previousDueDate: task.due_date });
+  }
 });
 document.getElementById('taskList').addEventListener('click', async (event) => {
   const button = event.target.closest('.modal-delete');

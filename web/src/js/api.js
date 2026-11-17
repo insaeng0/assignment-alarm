@@ -856,7 +856,8 @@ const API = {
         return { success: false, code: 'AUTH_CHANGED', error: '로그인 상태가 바뀌었습니다.' };
       }
       if (!res.ok) {
-        return { success: false, status: res.status, code: data?.code, error: data?.error || '요청을 처리하지 못했습니다. 다시 시도해주세요.' };
+        return { success: false, status: res.status, code: data?.code, error: data?.error || '요청을 처리하지 못했습니다. 다시 시도해주세요.',
+          ...(res.status === 409 && data?.code === 'ASSIGNMENT_DATE_CONFLICT' && typeof data.due_date === 'string' ? { due_date: data.due_date } : {}) };
       }
       if (bearer && isAuthRequest && data?.user) {
         try {
@@ -1033,6 +1034,7 @@ const API = {
   getAssignmentStatus(id) { return this.get(`/api/assignments/${id}/status`); },
   createAssignment(data) { return this.post('/api/assignments', data); },
   updateAssignment(id, data) { return this.put(`/api/assignments/${id}`, data); },
+  moveAssignment(id, dueDate, expectedDueDate) { return this.put(`/api/assignments/${id}/due-date`, { due_date: dueDate, expected_due_date: expectedDueDate }); },
   deleteAssignment(id) { return this.del(`/api/assignments/${id}`); },
   uploadAssignmentImage(dataUrl, fileName) { return this.post('/api/uploads/assignment-image', { image_data_url: dataUrl, file_name: fileName || null }); },
 
