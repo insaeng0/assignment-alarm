@@ -5,6 +5,12 @@ const row = (overrides = {}) => ({ ATPT_OFCDC_SC_CODE: SCHOOL.office, SD_SCHUL_C
 const payload = (rows, total = rows.length) => ({ SchoolSchedule: [{ head: [{ list_total_count: total }, { RESULT: { CODE: 'INFO-000' } }] }, { row: rows }] });
 const response = data => new Response(JSON.stringify(data));
 
+test('day-off labels are hidden without removing exams or related school activities', () => {
+  const hidden = ['토요휴업일', '성탄절', '크리스마스', '대체공휴일', '추석 연휴', '설날', '재량휴업일', '학교장 재량 휴업일', '어린이날', '부처님 오신 날', '성탄절(크리스마스)', '한글날'];
+  const visible = ['기말고사', '중간고사', '체험학습', '방학식', '개학식', '어린이날 행사', '성탄절 안전교육'];
+  assert.deepEqual(normalizeRows([...hidden, ...visible].map(EVENT_NM => row({ EVENT_NM })), '2026-12').map(event => event.title).sort(), visible.sort());
+});
+
 test('strict month and actual school dates reject malformed and foreign records', () => {
   for (const value of ['2026-00', '2026-13', '2026-1', ['2026-12'], '2026-12&KEY=x']) assert.equal(validMonth(value), false);
   assert.equal(validMonth('2026-12'), true);

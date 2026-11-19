@@ -4,6 +4,8 @@ const SCHOOL = Object.freeze({ name: '부산소프트웨어마이스터고등학
 const SOURCE = 'https://open.neis.go.kr/portal/data/service/selectServicePage.do?infId=OPEN17220190722175038389180&infSeq=2';
 const fail = code => Object.assign(new Error(code), { code });
 function validMonth(month) { return typeof month === 'string' && /^(20\d{2}|2100)-(0[1-9]|1[0-2])$/.test(month); }
+// Match whole day-off labels, so related school events such as '어린이날 행사' stay visible.
+const DAY_OFF_TITLE = /^(?:(?:토요|일요|재량|학교장재량)?휴업일?|휴무일|공휴일|대체(?:공휴일|휴일)|신정|설(?:날|연휴)?|추석(?:연휴)?|삼일절|3[·.]1절|어린이날|부처님오신날|석가탄신일|현충일|광복절|개천절|한글날|성탄절|크리스마스|기독탄신일)(?:\([^)]*\))*$/u;
 function normalizeRows(rows, month) {
   const unique = new Map();
   for (const row of rows) {
@@ -14,6 +16,7 @@ function normalizeRows(rows, month) {
     if (!/^\d{8}$/.test(raw) || date.slice(0, 7) !== month || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) throw fail('NEIS_INVALID_RESPONSE');
     const title = String(row.EVENT_NM || '').trim();
     if (!title || title.length > 300) throw fail('NEIS_INVALID_RESPONSE');
+    if (DAY_OFF_TITLE.test(title.normalize('NFKC').replace(/\s/g, ''))) continue;
     const detail = String(row.EVENT_CNTNT || '').trim().slice(0, 4000);
     const grades = ['ONE_GRADE_EVENT_YN', 'TW_GRADE_EVENT_YN', 'THREE_GRADE_EVENT_YN'].flatMap((field, index) => row[field] === 'Y' ? [index + 1] : []);
     const id = createHash('sha256').update(JSON.stringify([date, title, detail, grades])).digest('hex').slice(0, 24);
