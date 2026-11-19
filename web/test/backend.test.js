@@ -822,3 +822,35 @@ test('untrusted forwarded addresses cannot rotate the failed authentication IP l
     assert.equal(blocked.response.headers.get('retry-after'), '900');
   } finally { app.set('trust proxy', previousTrust); }
 });
+
+test('school schedules require authentication, strict month query and current grade privileges', async t => {
+  const { SchoolSchedule } = require('../lib/school-schedule');
+  let reads = 0;
+  t.mock.method(SchoolSchedule.prototype, 'getMonth', async month => { reads++; return { month, school: '부산소프트웨어마이스터고등학교', source: 'https://open.neis.go.kr', events: [{ id: 'one', grades: [1] }, { id: 'two', grades: [2] }, { id: 'all', grades: [1, 2, 3] }] }; });
+  assert.equal((await request('/api/school-events?month=2026-12')).response.status, 401);
+  for (const query of ['month=2026-13', 'month=2026-12&month=2026-11', 'month=2026-12&school=other', '']) assert.equal((await request('/api/school-events?' + query, { token: session() })).response.status, 400);
+  assert.equal(reads, 0);
+  const student = await request('/api/school-events?month=2026-12', { token: session(1) });
+  assert.equal(student.response.status, 200); assert.deepEqual(student.data.events.map(event => event.id), ['one', 'all']);
+  assert.deepEqual((await request('/api/school-events?month=2026-12', { token: session(3) })).data.events.map(event => event.id), ['two', 'all']);
+  assert.equal((await request('/api/school-events?month=2026-12', { token: session(2) })).data.events.length, 3);
+  const admin = { ...users.get(2) };
+  try {
+    Object.assign(users.get(2), { is_admin: 0, grade: 1 });
+    assert.equal((await request('/api/school-events?month=2026-12', { token: session(2) })).data.events.length, 2);
+  } finally { users.set(2, admin); }
+});
+test('school schedule provider errors stay private and retry requests have a separate per-user budget', async t => {
+  const { SchoolSchedule } = require('../lib/school-schedule');
+  let reads = 0;
+  t.mock.method(SchoolSchedule.prototype, 'getMonth', async () => { reads++; throw Object.assign(new Error('secret-provider-key'), { code: 'NEIS_NOT_CONFIGURED' }); });
+  for (let index = 0; index < 30; index++) {
+    const result = await request('/api/school-events?month=2026-12', { token: session(1), headers: { 'X-Forwarded-For': `198.51.100.${index + 1}` } });
+    assert.equal(result.response.status, 503); assert.equal(result.data.code, 'SCHOOL_EVENTS_NOT_CONFIGURED'); assert.ok(!result.raw.includes('secret-provider-key'));
+  }
+  const blocked = await request('/api/school-events?month=2026-11', { token: session(1) });
+  assert.equal(blocked.response.status, 429); assert.equal(blocked.data.code, 'SCHOOL_EVENTS_RATE_LIMITED'); assert.equal(reads, 30);
+  assert.equal((await request('/api/school-events?month=2026-12', { token: session(3) })).response.status, 503);
+  assert.equal((await request('/api/assignments', { token: session(1) })).response.status, 200);
+  assert.equal((await request('/api/school-events?month=2026-12', { token: session(1), method: 'POST', body: {} })).response.status, 404);
+});

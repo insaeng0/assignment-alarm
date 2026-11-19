@@ -13,6 +13,8 @@ const { validateImageDimensions } = require('./lib/image-dimensions');
 const { databaseTimeOptions, installUtcDatabaseSessions } = require('./lib/database-time');
 const { consumeRateLimitAttempt, checkRateLimitAttempt, consumeRateLimitGroup, boundedPositiveInteger } = require('./lib/rate-limit');
 const { rosterSchema, rosterError, normalizeRosterName, studentRosterScope, lookupRoster, publicRosterCandidates } = require('./lib/student-roster');
+const { SchoolSchedule, validMonth: validSchoolMonth } = require('./lib/school-schedule');
+const schoolSchedule = new SchoolSchedule({ apiKey: process.env.NEIS_API_KEY || '' });
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -110,6 +112,7 @@ const assignmentImageAttempts = new Map();
 const assignmentWriteAttempts = new Map();
 const assignmentCreateAttempts = new Map();
 const assignmentCreateBurstAttempts = new Map();
+const schoolEventsReadAttempts = new Map();
 const adminUserCache = new Map();
 const adminAssignmentCache = new Map();
 const adminMessageCache = new Map();
@@ -2136,6 +2139,27 @@ app.get('/api/assignments', authMiddleware, async (req, res) => {
     res.json(rows);
   } catch {
     res.status(500).json({ error: '서버 오류가 발생했습니다.' });
+  }
+});
+
+app.get('/api/school-events', authMiddleware, async (req, res) => {
+  if (Object.keys(req.query).some(key => key !== 'month') || !validSchoolMonth(req.query.month)) {
+    return res.status(400).json({ error: '조회할 달을 YYYY-MM 형식으로 입력해주세요.' });
+  }
+  const limit = consumeRateLimitAttempt(schoolEventsReadAttempts, `user:${req.user.id}`, {
+    windowMs: 600000, limit: 30, maxTrackedClients: AUTH_RATE_MAX_TRACKED_CLIENTS
+  });
+  if (!limit.allowed) return rateLimitFailure(res, limit, 'SCHOOL_EVENTS_RATE_LIMITED', '학교 일정 조회가 많습니다. 잠시 후 다시 시도해주세요.');
+  try {
+    const data = await schoolSchedule.getMonth(req.query.month);
+    const user = await getCurrentUser(req.user.id);
+    if (!user) return res.status(401).json({ error: '로그인 상태를 확인해주세요.' });
+    const events = isAdminUser(user) ? data.events : data.events.filter(event => event.grades.includes(Number(user.grade)));
+    res.json({ ...data, events });
+  } catch (error) {
+    // Never log provider URLs or raw errors: their URL can contain the API key.
+    res.status(503).json({ code: error?.code === 'NEIS_NOT_CONFIGURED' ? 'SCHOOL_EVENTS_NOT_CONFIGURED' : 'SCHOOL_EVENTS_UNAVAILABLE',
+      error: error?.code === 'NEIS_NOT_CONFIGURED' ? '학교 일정 연결을 준비 중입니다.' : '학교 일정을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.' });
   }
 });
 

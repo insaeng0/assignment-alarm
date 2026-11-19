@@ -350,3 +350,16 @@ html.theme-dark .preview-pill { background: #392a25; color: #f0b18e; }
   .auth-box h1 { font-size: 26px; }
 }
 @media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation: none !important; transition: none !important; } }
+
+/* Public NEIS events remain separate from assignments and personal progress. */
+.school-events-controls { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:0 18px 12px; font-size:11px; color:var(--text-muted); }
+.school-events-controls label { display:flex; align-items:center; gap:5px; color:var(--text-main); white-space:nowrap; }
+.school-events-controls input { accent-color:var(--accent); }
+.task-tag.school-event-tag { background:var(--bg-muted); color:var(--text-muted); border:1px solid var(--border-panel); cursor:inherit; }
+.task-tag.school-event-tag.exam { color:var(--urgent-text); background:var(--urgent-bg); border-color:var(--urgent-text); }
+.school-event-details { margin-bottom:16px; border:1px solid var(--border-panel); border-radius:8px; padding:14px; }
+.school-event-details h4 { font-size:12px; color:var(--accent); margin-bottom:10px; }
+.school-event-details article + article { border-top:1px solid var(--border-soft); padding-top:10px; margin-top:10px; }
+.school-event-details strong { font-size:14px; }
+.school-event-details p { font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; margin:6px 0; }
+.school-event-details small { display:block; color:var(--text-muted); font-size:11px; margin-top:6px; }

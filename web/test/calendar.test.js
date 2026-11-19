@@ -831,3 +831,49 @@ test('date drafts clear on account, class and role changes rather than entering 
     assert.ok(!renderedDateInput(app, 1).includes(`value="${shiftedDay(3)}"`));
   }
 });
+
+test('school events are escaped read-only date labels and never count as assignments or completion', async () => {
+  const app = await calendar({ id: 11, grade: 1, class_number: 2, is_admin: false, can_complete_assignments: true });
+  const progress = app.nodes.get('progressCount').textContent;
+  app.API.getSchoolEvents = async month => ({ month, updatedAt: '2026-11-19T00:00:00Z', events: [
+    { id: 'exam', date: day, title: '<기말고사>', detail: '<script>unsafe</script>', grades: [1], category: 'exam' },
+    { id: 'other', date: day, title: '2학년 시험', grades: [2], category: 'exam' }
+  ] });
+  await app.run('loadSchoolEvents()');
+  const html = app.nodes.get('calendarBody').innerHTML;
+  assert.match(html, /school-event-tag exam/); assert.match(html, /&lt;기말고사>/); assert.ok(!html.includes('2학년 시험'));
+  assert.ok(!html.includes('data-move-id="exam"')); assert.equal(app.nodes.get('progressCount').textContent, progress);
+  app.run(`openModal('${day}')`);
+  const details = app.nodes.get('taskList').innerHTML;
+  assert.match(details, /읽기 전용/); assert.match(details, /&lt;script>/); assert.ok(!details.includes('<script>'));
+  app.listeners.get('showSchoolEvents:change')({ target: { checked: false } });
+  assert.ok(!app.nodes.get('calendarBody').innerHTML.includes('school-event-tag')); assert.ok(!app.nodes.get('taskList').innerHTML.includes('학교 일정'));
+});
+test('late school reads cannot replace another month or another account scope', async () => {
+  const user = { id: 11, grade: 1, class_number: 2, is_admin: false, can_complete_assignments: true };
+  const app = await calendar(user);
+  const first = deferred(), second = deferred(); let calls = 0;
+  app.API.getSchoolEvents = () => ++calls === 1 ? first.promise : second.promise;
+  const old = app.run('loadSchoolEvents()');
+  app.run('changeMonth(1)');
+  const newDay = app.run('schoolMonth()') + '-10';
+  second.resolve({ events: [{ date: newDay, title: '새 달', grades: [1] }], updatedAt: 'now' });
+  await new Promise(setImmediate);
+  first.resolve({ events: [{ date: day, title: '이전 달', grades: [1] }] }); await old;
+  assert.match(app.nodes.get('calendarBody').innerHTML, /새 달/); assert.ok(!app.nodes.get('calendarBody').innerHTML.includes('이전 달'));
+  const accountRead = deferred(); app.API.getSchoolEvents = () => accountRead.promise;
+  const stale = app.run('loadSchoolEvents()'); user.id = 12; user.grade = 2; app.run('synchronizeViewScope(); renderCalendar()');
+  accountRead.resolve({ events: [{ date: newDay, title: '이전 사용자', grades: [2] }] }); await stale;
+  assert.ok(!app.nodes.get('calendarBody').innerHTML.includes('이전 사용자'));
+});
+test('school errors allow tasks to stay visible and administrators filter school events by grade', async () => {
+  const app = await calendar({ id: 11, grade: 1, class_number: 2, is_admin: true, can_complete_assignments: true });
+  app.API.getSchoolEvents = async () => { throw new Error('잠시 후 다시 시도해주세요.'); };
+  await app.run('loadSchoolEvents()');
+  assert.match(app.nodes.get('calendarBody').innerHTML, /내 반 과제/); assert.equal(app.nodes.get('retrySchoolEvents').hidden, false);
+  app.API.getSchoolEvents = async () => ({ events: [{ date: day, title: '1학년 시험', grades: [1] }, { date: day, title: '2학년 시험', grades: [2] }], updatedAt: 'now' });
+  await app.run('loadSchoolEvents()');
+  app.listeners.get('adminGradeFilter:change')({ target: { value: '2' } });
+  assert.match(app.nodes.get('calendarBody').innerHTML, /2학년 시험/); assert.ok(!app.nodes.get('calendarBody').innerHTML.includes('1학년 시험'));
+  assert.equal(app.nodes.get('retrySchoolEvents').hidden, true);
+});

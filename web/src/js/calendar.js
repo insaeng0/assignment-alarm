@@ -4,6 +4,9 @@ let assignments = [];
 let assignmentsLoaded = false;
 let assignmentsLoading = false;
 let assignmentsError = false;
+let schoolEvents = [], schoolEventsMonth = '', schoolEventsVersion = 0;
+let schoolEventsLoading = false, schoolEventsError = '', schoolEventsUpdated = '';
+let showSchoolEvents = true;
 let loadVersion = 0;
 let adminGradeFilter = 'all';
 let adminClassFilter = 'all';
@@ -43,6 +46,7 @@ function synchronizeViewScope(user = API.getUser()) {
   if (nextScope === localViewScope) return false;
   localViewScope = nextScope;
   assignments = []; assignmentsLoaded = false; assignmentsLoading = false; assignmentsError = false;
+  schoolEvents = []; schoolEventsMonth = ""; schoolEventsError = ""; schoolEventsUpdated = ""; schoolEventsLoading = false; schoolEventsVersion++;
   clearCalendarDrag();
   pendingAssignmentOperations.clear(); latestMutationFocus = null;
   assignmentDateDrafts.clear();
@@ -189,7 +193,7 @@ async function init() {
     API.loadUserInfo();
     API.initNotifications().catch(() => {});
     initAdminFilters(user);
-    await loadAssignments(user);
+    await Promise.all([loadAssignments(user), loadSchoolEvents(user)]);
   } catch {
     assignmentsError = true;
     assignmentsLoading = false;
@@ -228,6 +232,38 @@ async function loadAssignments(user = API.getUser()) {
   }
 }
 
+function schoolMonth() { return `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`; }
+async function loadSchoolEvents(user = API.getUser()) {
+  if (!user || typeof API.getSchoolEvents !== 'function') return;
+  synchronizeViewScope();
+  const scope = calendarViewScope(user), month = schoolMonth(), version = ++schoolEventsVersion;
+  if (!matchesViewScope(scope)) return;
+  schoolEventsLoading = true; schoolEventsError = ''; renderCalendar();
+  try {
+    const result = await API.getSchoolEvents(month);
+    if (!matchesViewScope(scope) || version !== schoolEventsVersion || month !== schoolMonth()) return;
+    if (!Array.isArray(result?.events)) throw new Error(result?.error || '학교 일정을 불러오지 못했습니다.');
+    schoolEvents = result.events; schoolEventsMonth = month; schoolEventsUpdated = result.updatedAt || '';
+  } catch (error) {
+    if (matchesViewScope(scope) && version === schoolEventsVersion && month === schoolMonth()) schoolEventsError = error.message || '학교 일정을 불러오지 못했습니다.';
+  } finally {
+    if (matchesViewScope(scope) && version === schoolEventsVersion && month === schoolMonth()) {
+      schoolEventsLoading = false; renderCalendar(); refreshOpenModal();
+    }
+  }
+}
+function visibleSchoolEvents() {
+  if (!showSchoolEvents || schoolEventsMonth !== schoolMonth()) return [];
+  const user = API.getUser();
+  const grade = user?.is_admin && adminGradeFilter !== 'all' ? Number(adminGradeFilter) : user?.is_admin ? null : Number(user?.grade);
+  return schoolEvents.filter(event => Array.isArray(event.grades) && (grade === null || event.grades.includes(grade))
+    && String(event.title).toLocaleLowerCase('ko').includes(taskSearch));
+}
+function schoolEventDetails(date) {
+  const events = visibleSchoolEvents().filter(event => event.date === date);
+  if (!events.length) return '';
+  return '<section class="school-event-details"><h4>학교 일정</h4>' + events.map(event => `<article><strong>${API.escapeHTML(event.title)}</strong>${event.detail ? `<p>${API.escapeHTML(event.detail)}</p>` : ''}<small>${API.escapeHTML(event.grades.length ? event.grades.join('·') + '학년' : '학년 정보 없음')} · 나이스 학사일정 · 읽기 전용</small></article>`).join('') + '</section>';
+}
 function initAdminFilters(user, resetToDefault = false) {
   if (resetToDefault) {
     const grade = Number(user?.grade);
@@ -276,6 +312,9 @@ function renderCalendar(forceLoading = assignmentsLoading && !assignmentsLoaded)
   const matching = getMatchingAssignments();
   const today = dateString(new Date());
   const threshold = urgentDate();
+  const school = visibleSchoolEvents();
+  document.getElementById('schoolEventsStatus').textContent = schoolEventsLoading ? '학교 일정 불러오는 중…' : schoolEventsError || (schoolEventsUpdated ? '나이스 학사일정 · 날짜를 눌러 상세 확인' : '');
+  document.getElementById('retrySchoolEvents').hidden = !schoolEventsError;
   document.getElementById('monthTitle').textContent = `${year}년 ${month + 1}월`;
   document.getElementById('classScope').textContent = user?.is_admin
     ? `${adminGradeFilter === 'all' ? '전체 학년' : adminGradeFilter + '학년'} · ${adminClassFilter === 'all' ? '전체 반' : adminClassFilter + '반'} · ${user.can_complete_assignments === true ? '제출 현황은 내 반 기준' : '제출 체크 대상 계정 아님'}`
@@ -296,8 +335,10 @@ function renderCalendar(forceLoading = assignmentsLoading && !assignmentsLoaded)
       const saving = pendingAssignmentOperations.get(Number(task.assignment_id))?.kind === 'move';
       return `<span class="task-tag ${cls}${saving ? ' saving' : ''}" data-move-id="${Number(task.assignment_id)}" draggable="${movable}" title="${API.escapeHTML(title + (saving ? ' · 저장 중' : movable ? ' · 드래그해서 날짜 변경' : ''))}"${saving ? ' aria-busy="true"' : ''}>${API.escapeHTML(title)}</span>`;
     }).join('');
-    const label = `${month + 1}월 ${d}일${date === today ? ', 오늘' : ''}, 과제 ${tasks.length}개`;
-    html += `<button type="button" class="day${date === today ? ' today' : ''}" data-date="${date}" aria-label="${label}"${date === today ? ' aria-current="date"' : ''}><span class="date">${d}</span>${tags}${tasks.length > 2 ? `<span class="task-more">+${tasks.length - 2}개 더</span>` : ''}</button>`;
+    const events = school.filter(event => event.date === date);
+    const eventTags = events.slice(0, 1).map(event => `<span class="task-tag school-event-tag${event.category === 'exam' ? ' exam' : ''}" draggable="false" title="${API.escapeHTML('학교 일정 · ' + event.title)}">${API.escapeHTML(event.title)}</span>`).join('');
+    const label = `${month + 1}월 ${d}일${date === today ? ', 오늘' : ''}, 과제 ${tasks.length}개${events.length ? ', 학교 일정 ' + events.length + '개' : ''}`;
+    html += `<button type="button" class="day${date === today ? ' today' : ''}" data-date="${date}" aria-label="${label}"${date === today ? ' aria-current="date"' : ''}><span class="date">${d}</span>${eventTags}${events.length > 1 ? `<span class="task-more">학교 일정 +${events.length - 1}개</span>` : ''}${tags}${tasks.length > 2 ? `<span class="task-more">+${tasks.length - 2}개 더</span>` : ''}</button>`;
   }
   html += '<div class="day empty" aria-hidden="true"></div>'.repeat((7 - (firstDay + lastDate) % 7) % 7);
   document.getElementById('calendarBody').innerHTML = html;
@@ -359,6 +400,7 @@ function openModal(date, { allTasks = false, keepFocus = false } = {}) {
   const [year, month, day] = date.split('-').map(Number);
   document.getElementById('modalTitle').textContent = `${year}년 ${month}월 ${day}일 과제`;
   document.getElementById('taskList').innerHTML = tasks.length ? tasks.map((task) => `<div class="assignment-item${isCompleted(task) ? ' done' : ''}"><div class="info"><div class="title">${API.escapeHTML(task.title)}</div>${task.content ? `<div class="detail">${API.renderTextWithLinks(task.content)}</div>` : ''}<div class="meta">${API.escapeHTML(taskMeta(task, user))}</div>${dateMoveControl(task, user)}</div><div class="actions">${canCompleteAssignment(user, task) ? `<label class="submit-check"><input type="checkbox" class="modal-submit-toggle" data-id="${Number(task.assignment_id)}" ${isCompleted(task) ? 'checked' : ''} ${pendingAssignmentOperations.has(Number(task.assignment_id)) ? 'disabled aria-busy="true"' : ''}><span>${user?.is_admin ? '내 제출 완료' : '제출 완료'}</span></label>` : ''}${canDeleteAssignment(user, task) ? `<button type="button" class="btn btn-danger btn-sm modal-delete" data-id="${Number(task.assignment_id)}" ${pendingAssignmentOperations.has(Number(task.assignment_id)) ? 'disabled' : ''}>삭제</button>` : ''}</div></div>`).join('') : '<div class="empty-state">이 날짜에 표시할 과제가 없어요.<br>필터를 확인하거나 새 과제를 등록해보세요.</div><a class="btn btn-primary" href="register.html">새 과제 등록</a>';
+  document.getElementById('taskList').innerHTML = schoolEventDetails(date) + document.getElementById('taskList').innerHTML;
   document.getElementById('modal').classList.add('show');
   document.body.classList.add('modal-open');
   const focusedReplacement = focusedSelector && document.querySelector(focusedSelector);
@@ -612,11 +654,12 @@ document.getElementById('taskList').addEventListener('change', async (event) => 
 function changeMonth(offset) {
   currentDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + offset, 1);
   renderCalendar();
+  void loadSchoolEvents();
 }
 document.getElementById('prevMonth').addEventListener('click', () => changeMonth(-1));
 document.getElementById('nextMonth').addEventListener('click', () => changeMonth(1));
 document.getElementById('todayMonth').addEventListener('click', () => {
-  const today = new Date(); currentDate = new Date(today.getFullYear(), today.getMonth(), 1); renderCalendar();
+  const today = new Date(); currentDate = new Date(today.getFullYear(), today.getMonth(), 1); renderCalendar(); void loadSchoolEvents();
 });
 document.querySelectorAll('[data-task-filter]').forEach((button) => button.addEventListener('click', () => {
   taskFilter = button.dataset.taskFilter;
@@ -633,6 +676,8 @@ document.getElementById('adminGradeFilter').addEventListener('change', (event) =
   renderCalendar();
 });
 document.getElementById('adminClassFilter').addEventListener('change', (event) => { adminClassFilter = event.target.value; renderCalendar(); });
+document.getElementById('showSchoolEvents').addEventListener('change', event => { showSchoolEvents = event.target.checked; renderCalendar(); refreshOpenModal(); });
+document.getElementById('retrySchoolEvents').addEventListener('click', () => { if (!schoolEventsLoading) void loadSchoolEvents(); });
 document.getElementById('retryAssignments').addEventListener('click', () => { if (!assignmentsLoading) loadAssignments(); });
 document.getElementById('closeModal').addEventListener('click', closeModal);
 document.getElementById('modal').addEventListener('click', (event) => { if (event.target.id === 'modal') closeModal(); });

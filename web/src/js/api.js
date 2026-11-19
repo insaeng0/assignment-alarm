@@ -1033,6 +1033,7 @@ const API = {
   getAssignments() { return this.get('/api/assignments'); },
   getAssignmentStatus(id) { return this.get(`/api/assignments/${id}/status`); },
   createAssignment(data) { return this.post('/api/assignments', data); },
+  getSchoolEvents(month) { return this.get('/api/school-events?month=' + encodeURIComponent(month)); },
   updateAssignment(id, data) { return this.put(`/api/assignments/${id}`, data); },
   moveAssignment(id, dueDate, expectedDueDate) { return this.put(`/api/assignments/${id}/due-date`, { due_date: dueDate, expected_due_date: expectedDueDate }); },
   deleteAssignment(id) { return this.del(`/api/assignments/${id}`); },
